@@ -5,6 +5,7 @@ const agents = new Map();
 const statuses = {};
 const approvals = new Map();
 let chats = {};
+let skillCatalog = [];
 const streaming = {};
 let selected = null;
 let ws = null;
@@ -34,6 +35,7 @@ function onEvent(e) {
       agents.clear();
       for (const a of e.agents) agents.set(a.id, a);
       chats = e.chats;
+      skillCatalog = e.skills ?? [];
       Object.assign(statuses, e.statuses);
       approvals.clear();
       for (const a of e.approvals) approvals.set(a.id, a);
@@ -46,7 +48,10 @@ function onEvent(e) {
       agents.set(e.agent.id, e.agent);
       chats[e.agent.id] ??= [];
       renderOffice();
-      if (selected === e.agent.id) renderHead();
+      if (selected === e.agent.id) {
+        renderHead();
+        renderSkills();
+      }
       break;
     case 'removed':
       agents.delete(e.agentId);
@@ -194,10 +199,21 @@ function renderMemos() {
           ${portraitSVG(d.name)}
           <div><b>${esc(d.name)}</b>${esc(d.role)}<br><span class="chip">${esc(MODEL_NAMES[d.model] ?? d.model)}</span> <span class="chip">${esc(d.project)}</span></div>
         </div>
+        ${skillChips(d.skills)}
         <p>${esc(a.detail)}</p>
         <input placeholder="Note for ${esc(agents.get(a.agentId)?.name ?? 'the orchestrator')} (optional)" aria-label="Note">
         <div class="actions">
           <button class="btn go" data-act="yes">Hire ${esc(d.name)}</button>
+          <button class="btn no" data-act="no">Not now</button>
+        </div>`;
+    } else if (a.kind === 'skills') {
+      el.innerHTML = `
+        <h3>${esc(a.title)}</h3>
+        ${skillChips(a.data.skills)}
+        <p>${esc(a.detail)}</p>
+        <input placeholder="Note for ${esc(agents.get(a.agentId)?.name ?? 'the orchestrator')} (optional)" aria-label="Note">
+        <div class="actions">
+          <button class="btn go" data-act="yes">Give skills</button>
           <button class="btn no" data-act="no">Not now</button>
         </div>`;
     } else {
@@ -220,6 +236,15 @@ function renderMemos() {
     });
     box.appendChild(el);
   }
+}
+
+function skillLabel(id) {
+  return skillCatalog.find((s) => s.id === id)?.name ?? id;
+}
+
+function skillChips(ids) {
+  if (!ids?.length) return '';
+  return `<p class="memo-skills">${ids.map((id) => `<span class="chip skill">${esc(skillLabel(id))}</span>`).join(' ')}</p>`;
 }
 
 // ---------- chat panel ----------
@@ -299,6 +324,37 @@ function renderHead() {
   $('input').placeholder = `Message ${a.name}…`;
 }
 
+function renderSkills() {
+  const a = agents.get(selected);
+  const box = $('p-skills');
+  box.hidden = !a || a.isOrchestrator;
+  if (box.hidden) return;
+  $('p-skills-sum').textContent = a.skills.length
+    ? `Skills: ${a.skills.map(skillLabel).join(', ')}`
+    : 'Skills: none yet';
+  const list = $('p-skill-list');
+  if (!skillCatalog.length) {
+    list.innerHTML = '<p class="hint">No skills installed. Add skill folders to agent-office/skills, then reload.</p>';
+    return;
+  }
+  list.innerHTML = skillCatalog
+    .map((s) => {
+      const on = a.skills.includes(s.id);
+      return `<button type="button" class="skill-toggle" aria-pressed="${on}" data-skill="${esc(s.id)}" title="${esc(s.description)}">
+        <b>${esc(s.name)}</b><span>${esc(s.description)}</span></button>`;
+    })
+    .join('');
+}
+
+$('p-skill-list').addEventListener('click', (e) => {
+  const btn = e.target.closest('[data-skill]');
+  const a = agents.get(selected);
+  if (!btn || !a) return;
+  const id = btn.dataset.skill;
+  const skills = a.skills.includes(id) ? a.skills.filter((x) => x !== id) : [...a.skills, id];
+  sendWS({ type: 'set_skills', agentId: a.id, skills });
+});
+
 function renderComposer() {
   const s = statuses[selected]?.status ?? 'idle';
   $('p-stop').hidden = s === 'idle' || s === 'error';
@@ -309,6 +365,7 @@ function openChat(id) {
   document.body.classList.add('chatting');
   $('panel').hidden = false;
   renderHead();
+  renderSkills();
   renderComposer();
   const log = $('log');
   log.innerHTML = '';

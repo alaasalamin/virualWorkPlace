@@ -2,7 +2,8 @@ import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { join, extname, normalize, sep } from 'node:path';
 import { WebSocketServer, WebSocket } from 'ws';
-import { ROOT, load, agents, chats, getAgent, removeAgent, statuses, updateAgent } from './store.ts';
+import { ROOT, load, flush, agents, chats, getAgent, removeAgent, statuses, updateAgent } from './store.ts';
+import { catalog, ensureOfficePlugin, resolveSkills } from './skills.ts';
 import { decide, onApprovalChange, pendingApprovals } from './approvals.ts';
 import { onRuntimeEvent, send, stop } from './runtime.ts';
 
@@ -18,6 +19,15 @@ const TYPES: Record<string, string> = {
 };
 
 load();
+ensureOfficePlugin();
+
+// Save everything before exiting so no conversation is lost.
+for (const sig of ['SIGINT', 'SIGTERM'] as const) {
+  process.on(sig, () => {
+    flush();
+    process.exit(0);
+  });
+}
 
 const http = createServer(async (req, res) => {
   const url = new URL(req.url ?? '/', `http://${req.headers.host}`);
@@ -60,6 +70,7 @@ wss.on('connection', (ws) => {
       chats: chats(),
       statuses: Object.fromEntries(statuses),
       approvals: pendingApprovals(),
+      skills: catalog().map(({ id, name, description, plugin }) => ({ id, name, description, plugin })),
     }),
   );
 
@@ -86,6 +97,13 @@ wss.on('connection', (ws) => {
         const name = String(m.name ?? '').trim().slice(0, 40);
         const a = name && updateAgent(String(m.agentId), { name });
         if (a) broadcast({ type: 'agent', agent: a });
+        break;
+      }
+      case 'set_skills': {
+        const a = getAgent(String(m.agentId));
+        if (!a || a.isOrchestrator || !Array.isArray(m.skills)) break;
+        const updated = updateAgent(a.id, { skills: resolveSkills(m.skills.map(String)).ids });
+        if (updated) broadcast({ type: 'agent', agent: updated });
         break;
       }
       case 'dismiss': {

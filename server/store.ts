@@ -32,6 +32,9 @@ export type Agent = {
   sessionId: string | null;
   costUsd: number;
   alwaysAllow: string[];
+  skills: string[];
+  // True while a turn is running; still true on load means the app stopped mid-task.
+  busy: boolean;
   createdAt: number;
 };
 
@@ -56,6 +59,13 @@ export function load() {
   mkdirSync(HQ_DIR, { recursive: true });
   mkdirSync(PROJECTS_DIR, { recursive: true });
   if (existsSync(STATE_FILE)) state = JSON.parse(readFileSync(STATE_FILE, 'utf8'));
+  for (const a of state.agents) {
+    a.skills ??= [];
+    if (a.busy) {
+      a.busy = false;
+      addChat(a.id, 'system', `The app stopped while ${a.name} was working. Ask them to continue if the task isn't finished.`);
+    }
+  }
   if (!state.agents.some((a) => a.isOrchestrator)) {
     addAgent({
       name: 'Maya',
@@ -71,11 +81,15 @@ export function load() {
 let saveTimer: NodeJS.Timeout | null = null;
 function save() {
   if (saveTimer) return;
-  saveTimer = setTimeout(() => {
-    saveTimer = null;
-    writeFileSync(STATE_FILE + '.tmp', JSON.stringify(state, null, 2));
-    renameSync(STATE_FILE + '.tmp', STATE_FILE);
-  }, 200);
+  saveTimer = setTimeout(flush, 200);
+}
+
+// Writes pending changes now. Called on shutdown so nothing is lost.
+export function flush() {
+  if (saveTimer) clearTimeout(saveTimer);
+  saveTimer = null;
+  writeFileSync(STATE_FILE + '.tmp', JSON.stringify(state, null, 2));
+  renameSync(STATE_FILE + '.tmp', STATE_FILE);
 }
 
 export const agents = () => state.agents;
@@ -89,7 +103,9 @@ export function slugify(s: string) {
   return s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 48) || 'project';
 }
 
-export function addAgent(a: Pick<Agent, 'name' | 'role' | 'personality' | 'model' | 'project' | 'isOrchestrator'>) {
+export function addAgent(
+  a: Pick<Agent, 'name' | 'role' | 'personality' | 'model' | 'project' | 'isOrchestrator'> & { skills?: string[] },
+) {
   const project = a.project ? slugify(a.project) : null;
   const cwd = project ? join(PROJECTS_DIR, project) : HQ_DIR;
   mkdirSync(cwd, { recursive: true });
@@ -101,6 +117,8 @@ export function addAgent(a: Pick<Agent, 'name' | 'role' | 'personality' | 'model
     sessionId: null,
     costUsd: 0,
     alwaysAllow: [],
+    skills: a.skills ?? [],
+    busy: false,
     createdAt: Date.now(),
   };
   state.agents.push(agent);

@@ -357,6 +357,48 @@ body.chatting .office { right: var(--panel-w); }
   border-radius: 10px;
 }
 
+/* ---------- skills ---------- */
+
+.skills { border-bottom: 3px solid var(--ink); background: var(--paper); }
+.skills[hidden] { display: none; }
+.skills summary {
+  padding: 10px 16px;
+  cursor: pointer;
+  font: 600 15px/1.3 var(--display);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.skill-list { display: flex; flex-direction: column; gap: 6px; max-height: 38vh; overflow-y: auto; padding: 0 12px 12px; }
+.skill-toggle {
+  display: block;
+  padding: 7px 10px 7px 34px;
+  position: relative;
+  text-align: left;
+  background: #fff;
+  border: 2px solid var(--ink);
+  border-radius: 10px;
+  cursor: pointer;
+}
+.skill-toggle::before {
+  content: '';
+  position: absolute;
+  left: 10px;
+  top: 10px;
+  width: 14px;
+  height: 14px;
+  border: 2px solid var(--ink);
+  border-radius: 4px;
+  background: #fff;
+}
+.skill-toggle[aria-pressed="true"] { background: #E3F7EC; }
+.skill-toggle[aria-pressed="true"]::before { background: var(--go); box-shadow: inset 0 0 0 2px #fff; }
+.skill-toggle b { display: block; font: 600 14.5px/1.3 var(--display); }
+.skill-toggle span { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; font-size: 12.5px; color: var(--ink-soft); }
+.hint { margin: 0; font-size: 13.5px; color: var(--ink-soft); }
+.memo-skills { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip.skill { background: #E3F7EC; }
+
 @media (max-width: 760px) {
   :root { --panel-w: 100vw; }
   body.chatting .office { right: 0; }

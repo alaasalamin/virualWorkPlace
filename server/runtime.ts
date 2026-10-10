@@ -7,6 +7,7 @@ import {
 } from './store.ts';
 import type { Agent, ChatMsg, ModelKey, Status } from './store.ts';
 import { requestApproval } from './approvals.ts';
+import { catalog, resolveSkills } from './skills.ts';
 
 export type ServerEvent =
   | { type: 'agent'; agent: Agent }
@@ -30,7 +31,7 @@ function chat(agentId: string, from: ChatMsg['from'], text: string) {
 
 // ---------- permissions ----------
 
-const AUTO_ALLOW = new Set(['Read', 'Glob', 'Grep', 'LS', 'TodoWrite', 'WebSearch', 'WebFetch', 'NotebookRead']);
+const AUTO_ALLOW = new Set(['Read', 'Glob', 'Grep', 'LS', 'TodoWrite', 'WebSearch', 'WebFetch', 'NotebookRead', 'Skill']);
 const EDIT_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit']);
 
 function inside(path: unknown, dir: string) {
@@ -40,7 +41,7 @@ function inside(path: unknown, dir: string) {
 }
 
 function summarize(toolName: string, input: Record<string, unknown>) {
-  const pick = input.command ?? input.file_path ?? input.notebook_path ?? input.pattern ?? input.url ?? input.query;
+  const pick = input.skill ?? input.command ?? input.file_path ?? input.notebook_path ?? input.pattern ?? input.url ?? input.query;
   if (typeof pick === 'string') return pick.length > 400 ? pick.slice(0, 400) + '…' : pick;
   const json = JSON.stringify(input);
   return json.length > 400 ? json.slice(0, 400) + '…' : json;
@@ -92,6 +93,7 @@ How you work:
 - Use list_team to see who is in the office and what they are doing.
 - When the team lacks a skill a task needs, call propose_agent to hire someone. Every hire needs the owner's approval, so explain briefly why in the reason field. Give each hire a real human first name that isn't already taken, a clear role, a short personality, a model, and a project name (one folder per project; teammates on the same project share it).
 - Choose models deliberately: "haiku" for simple or repetitive work, "sonnet" for most engineering, "opus" for hard design or debugging. Never hire a "fable" worker unless the owner asks.
+- Teammates can have skills: packaged expertise such as frontend design. Use list_skills to see what's available, give fitting skills when you hire (skills field), and use request_skills to add skills to someone already on the team. The owner approves both.
 - Use assign_task to hand a teammate a concrete, self-contained task. They don't see this conversation, so include all context they need. You get their report back when they finish.
 - Don't hire more people than the work needs. Reuse existing teammates when they fit.
 - You can read files in the projects folder (${PROJECTS_DIR}) to check work, but you don't edit files yourself.
@@ -109,10 +111,54 @@ function officeServer() {
       tool('list_team', 'List everyone in the office with their role, model, project and current status.', {}, async () => {
         const lines = agents().map((a) => {
           const s = statuses.get(a.id)?.status ?? 'idle';
-          return `- ${a.name}: ${a.role}${a.isOrchestrator ? ' (you)' : ''} | model ${a.model} | project ${a.project ?? '-'} | ${s}`;
+          const sk = a.skills.length ? a.skills.join(', ') : 'none';
+          return `- ${a.name}: ${a.role}${a.isOrchestrator ? ' (you)' : ''} | model ${a.model} | project ${a.project ?? '-'} | skills ${sk} | ${s}`;
         });
         return { content: [{ type: 'text', text: lines.join('\n') }] };
       }),
+      tool('list_skills', 'List the skills teammates can be given, with what each one is for.', {}, async () => {
+        const cat = catalog();
+        const text = cat.length ? cat.map((s) => `- ${s.id}: ${s.description}`).join('\n') : 'No skills are installed.';
+        return { content: [{ type: 'text', text }] };
+      }),
+      tool(
+        'request_skills',
+        'Ask the owner to give an existing teammate more skills. Blocks until they approve or reject.',
+        {
+          agent_name: z.string(),
+          skills: z.array(z.string()).describe('Skill ids from list_skills'),
+          reason: z.string().describe('Why they need these skills, shown to the owner'),
+        },
+        async ({ agent_name, skills, reason }) => {
+          const a = findAgentByName(agent_name);
+          if (!a || a.isOrchestrator) {
+            return { content: [{ type: 'text', text: `No teammate named ${agent_name}. Use list_team.` }], isError: true };
+          }
+          const { ids, unknown } = resolveSkills(skills);
+          if (unknown.length) {
+            return { content: [{ type: 'text', text: `Unknown skills: ${unknown.join(', ')}. Use list_skills.` }], isError: true };
+          }
+          const added = ids.filter((id) => !a.skills.includes(id));
+          if (!added.length) return { content: [{ type: 'text', text: `${a.name} already has those skills.` }] };
+          const boss = orchestrator();
+          setStatus(boss.id, 'waiting', `wants skills for ${a.name}`);
+          const d = await requestApproval({
+            kind: 'skills',
+            agentId: boss.id,
+            title: `${boss.name} wants to give ${a.name} new skills`,
+            detail: reason,
+            data: { name: a.name, skills: added },
+          });
+          setStatus(boss.id, 'thinking');
+          if (!d.approved) {
+            return { content: [{ type: 'text', text: `The owner said no.${d.note ? ` Their note: ${d.note}` : ''}` }] };
+          }
+          const updated = updateAgent(a.id, { skills: [...a.skills, ...added] });
+          if (updated) broadcast({ type: 'agent', agent: updated });
+          chat(a.id, 'system', `${a.name} learned: ${added.join(', ')}.`);
+          return { content: [{ type: 'text', text: `Approved. ${a.name} now has: ${updated?.skills.join(', ')}.` }] };
+        },
+      ),
       tool(
         'propose_agent',
         'Propose hiring a new agent. Blocks until the office owner approves or rejects, then returns the decision.',
@@ -122,11 +168,16 @@ function officeServer() {
           personality: z.string().describe('One or two sentences on how they work and talk'),
           model: z.enum(['haiku', 'sonnet', 'opus', 'fable']),
           project: z.string().describe('Project folder name they will work in'),
+          skills: z.array(z.string()).optional().describe('Skill ids from list_skills that fit the role'),
           reason: z.string().describe('Why the team needs this person, shown to the owner'),
         },
         async (args) => {
           if (findAgentByName(args.name)) {
             return { content: [{ type: 'text', text: `Someone named ${args.name} already works here. Pick another name.` }], isError: true };
+          }
+          const { ids: skillIds, unknown } = resolveSkills(args.skills ?? []);
+          if (unknown.length) {
+            return { content: [{ type: 'text', text: `Unknown skills: ${unknown.join(', ')}. Use list_skills.` }], isError: true };
           }
           const boss = orchestrator();
           setStatus(boss.id, 'waiting', `wants to hire ${args.name}`);
@@ -135,14 +186,14 @@ function officeServer() {
             agentId: boss.id,
             title: `${boss.name} wants to hire ${args.name}`,
             detail: args.reason,
-            data: { ...args },
+            data: { ...args, skills: skillIds },
           });
           setStatus(boss.id, 'thinking');
           if (!d.approved) {
             chat(boss.id, 'system', `You declined hiring ${args.name}${d.note ? `: ${d.note}` : ''}.`);
             return { content: [{ type: 'text', text: `The owner rejected hiring ${args.name}.${d.note ? ` Their note: ${d.note}` : ''}` }] };
           }
-          const agent = addAgent({ ...args, model: args.model as ModelKey, isOrchestrator: false });
+          const agent = addAgent({ ...args, skills: skillIds, model: args.model as ModelKey, isOrchestrator: false });
           setStatus(agent.id, 'idle');
           broadcast({ type: 'agent', agent });
           chat(boss.id, 'system', `${agent.name} joined the office as ${agent.role}.`);
@@ -198,6 +249,7 @@ async function runTurn(agentId: string, text: string, from: 'user' | 'boss', ret
   const agent = getAgent(agentId);
   if (!agent) return '';
   if (!retried) chat(agentId, from, text);
+  updateAgent(agentId, { busy: true });
   setStatus(agentId, 'thinking');
 
   const abort = new AbortController();
@@ -219,9 +271,14 @@ async function runTurn(agentId: string, text: string, from: 'user' | 'boss', ret
     options.tools = ['Read', 'Glob', 'Grep'];
     options.additionalDirectories = [PROJECTS_DIR];
     options.mcpServers = { office: officeServer() };
-    options.allowedTools = ['mcp__office__list_team', 'mcp__office__propose_agent', 'mcp__office__assign_task'];
+    options.allowedTools = ['list_team', 'list_skills', 'propose_agent', 'request_skills', 'assign_task'].map((t) => `mcp__office__${t}`);
+    options.skills = [];
   } else {
     options.systemPrompt = { type: 'preset', preset: 'claude_code', append: workerPrompt(agent) };
+    // Load only the plugins that hold this agent's skills, and enable only those skills.
+    const mine = catalog().filter((s) => agent.skills.includes(s.id));
+    options.plugins = [...new Set(mine.map((s) => s.pluginPath))].map((path) => ({ type: 'local' as const, path }));
+    options.skills = mine.map((s) => s.id);
   }
 
   const texts: string[] = [];
@@ -244,6 +301,7 @@ async function runTurn(agentId: string, text: string, from: 'user' | 'boss', ret
     }
   } finally {
     controllers.delete(agentId);
+    updateAgent(agentId, { busy: false });
   }
   setStatus(agentId, 'idle');
   return texts.join('\n\n');

@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 
 export type Approval = {
   id: string;
-  kind: 'hire' | 'tool';
+  kind: 'hire' | 'tool' | 'skills';
   agentId: string;
   title: string;
   detail: string;
