@@ -1,0 +1,106 @@
+import { createServer } from 'node:http';
+import { readFile } from 'node:fs/promises';
+import { join, extname, normalize, sep } from 'node:path';
+import { WebSocketServer, WebSocket } from 'ws';
+import { ROOT, load, agents, chats, getAgent, removeAgent, statuses, updateAgent } from './store.ts';
+import { decide, onApprovalChange, pendingApprovals } from './approvals.ts';
+import { onRuntimeEvent, send, stop } from './runtime.ts';
+
+const HOST = '127.0.0.1';
+const PORT = Number(process.env.PORT ?? 4545);
+const PUBLIC = join(ROOT, 'public');
+const TYPES: Record<string, string> = {
+  '.html': 'text/html; charset=utf-8',
+  '.js': 'text/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.svg': 'image/svg+xml',
+  '.png': 'image/png',
+};
+
+load();
+
+const http = createServer(async (req, res) => {
+  const url = new URL(req.url ?? '/', `http://${req.headers.host}`);
+  const rel = normalize(url.pathname === '/' ? '/index.html' : url.pathname);
+  const file = join(PUBLIC, rel);
+  if (!file.startsWith(PUBLIC + sep)) {
+    res.writeHead(403).end();
+    return;
+  }
+  try {
+    const body = await readFile(file);
+    res.writeHead(200, { 'content-type': TYPES[extname(file)] ?? 'application/octet-stream', 'cache-control': 'no-store' });
+    res.end(body);
+  } catch {
+    res.writeHead(404).end('Not found');
+  }
+});
+
+// Only pages served by this server may connect; stops other websites from driving the agents.
+const allowedOrigins = new Set([`http://${HOST}:${PORT}`, `http://localhost:${PORT}`]);
+const wss = new WebSocketServer({
+  server: http,
+  path: '/ws',
+  verifyClient: ({ origin }: { origin: string }) => allowedOrigins.has(origin),
+});
+
+function broadcast(event: unknown) {
+  const data = JSON.stringify(event);
+  for (const c of wss.clients) if (c.readyState === WebSocket.OPEN) c.send(data);
+}
+
+onRuntimeEvent(broadcast);
+onApprovalChange(broadcast);
+
+wss.on('connection', (ws) => {
+  ws.send(
+    JSON.stringify({
+      type: 'snapshot',
+      agents: agents(),
+      chats: chats(),
+      statuses: Object.fromEntries(statuses),
+      approvals: pendingApprovals(),
+    }),
+  );
+
+  ws.on('message', (raw) => {
+    let m: any;
+    try {
+      m = JSON.parse(String(raw));
+    } catch {
+      return;
+    }
+    switch (m.type) {
+      case 'chat': {
+        const text = String(m.text ?? '').trim();
+        if (text && getAgent(m.agentId)) send(m.agentId, text, 'user').catch(() => {});
+        break;
+      }
+      case 'decide':
+        decide(String(m.id), { approved: !!m.approved, always: !!m.always, note: m.note ? String(m.note) : undefined });
+        break;
+      case 'stop':
+        stop(String(m.agentId));
+        break;
+      case 'rename': {
+        const name = String(m.name ?? '').trim().slice(0, 40);
+        const a = name && updateAgent(String(m.agentId), { name });
+        if (a) broadcast({ type: 'agent', agent: a });
+        break;
+      }
+      case 'dismiss': {
+        const a = getAgent(String(m.agentId));
+        if (a && !a.isOrchestrator) {
+          stop(a.id);
+          removeAgent(a.id);
+          broadcast({ type: 'removed', agentId: a.id });
+        }
+        break;
+      }
+    }
+  });
+});
+
+http.listen(PORT, HOST, () => {
+  console.log(`Agent Office running at http://localhost:${PORT}`);
+});

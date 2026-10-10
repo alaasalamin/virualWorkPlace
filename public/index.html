@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Agent Office</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible:ital,wght@0,400;0,700;1,400&family=Fredoka:wght@500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main class="office" id="office">
+    <div class="wall">
+      <div class="sign">Agent Office</div>
+      <div class="window" aria-hidden="true"><span></span><span></span><span></span><span></span></div>
+      <div class="plant" aria-hidden="true">
+        <svg viewBox="0 0 60 90"><path d="M30 60 C10 50 6 26 14 14 C22 30 28 40 30 60 Z" fill="#2BB673" stroke="#1E2A3A" stroke-width="3" stroke-linejoin="round"/><path d="M30 60 C50 50 54 22 46 8 C38 26 32 40 30 60 Z" fill="#3FCB86" stroke="#1E2A3A" stroke-width="3" stroke-linejoin="round"/><path d="M16 60 L44 60 L40 86 L20 86 Z" fill="#F7A072" stroke="#1E2A3A" stroke-width="3" stroke-linejoin="round"/></svg>
+      </div>
+    </div>
+    <div class="floor">
+      <div class="team" id="team"></div>
+      <div class="front" id="front"></div>
+    </div>
+    <div class="memos" id="memos" aria-live="polite"></div>
+    <div class="offline" id="offline" hidden>Can't reach the office server. Start it with <code>npm start</code> in agent-office. Retrying…</div>
+  </main>
+
+  <aside class="panel" id="panel" hidden aria-label="Chat">
+    <header class="panel-head">
+      <div class="panel-portrait" id="p-portrait"></div>
+      <div class="panel-who">
+        <h2 id="p-name"></h2>
+        <p id="p-role"></p>
+        <p class="panel-meta"><span class="chip" id="p-model"></span><span class="chip" id="p-project"></span><span class="usage" id="p-cost" title="Estimated API-equivalent cost of this agent's work. On a Max plan this comes out of your usage limits, not money."></span></p>
+      </div>
+      <button class="icon-btn" id="p-close" aria-label="Close chat">✕</button>
+    </header>
+    <div class="log" id="log"></div>
+    <form class="composer" id="composer">
+      <textarea id="input" rows="2" placeholder="Message…" aria-label="Message"></textarea>
+      <div class="composer-row">
+        <button type="button" class="link-btn danger" id="p-dismiss" hidden>Let go</button>
+        <span class="spacer"></span>
+        <button type="button" class="btn ghost" id="p-stop" hidden>Stop</button>
+        <button type="submit" class="btn">Send</button>
+      </div>
+    </form>
+  </aside>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>
