@@ -1,6 +1,9 @@
 import { stationSVG, portraitSVG } from './characters.js';
+import { initWorld, renderRooms, roomFor, focusTeam, refreshCamera } from './world.js';
+import { initVisits, onPeer, onMessage as visitMessage, onDelta as visitDelta, onStatus as visitStatus } from './visits.js';
 
 const $ = (id) => document.getElementById(id);
+const teams = new Map();
 const agents = new Map();
 const statuses = {};
 const approvals = new Map();
@@ -32,6 +35,8 @@ function sendWS(obj) {
 function onEvent(e) {
   switch (e.type) {
     case 'snapshot':
+      teams.clear();
+      for (const t of e.teams ?? []) teams.set(t.id, t);
       agents.clear();
       for (const a of e.agents) agents.set(a.id, a);
       chats = e.chats;
@@ -41,6 +46,12 @@ function onEvent(e) {
       for (const a of e.approvals) approvals.set(a.id, a);
       renderOffice();
       renderMemos();
+      if (!cameraRestored) {
+        cameraRestored = true;
+        const first = [...teams.values()].sort((a, b) => a.createdAt - b.createdAt)[0];
+        if (first) focusTeam(first.id, false);
+      }
+      setTimeout(runDemo, 600);
       if (selected && agents.has(selected)) openChat(selected);
       else if (selected) closeChat();
       break;
@@ -48,10 +59,27 @@ function onEvent(e) {
       agents.set(e.agent.id, e.agent);
       chats[e.agent.id] ??= [];
       renderOffice();
+      if (hoverId === e.agent.id) renderHover();
       if (selected === e.agent.id) {
         renderHead();
         renderSkills();
       }
+      break;
+    case 'team':
+      teams.set(e.team.id, e.team);
+      renderOffice();
+      if (selected) renderHead();
+      break;
+    case 'team_created':
+      $('team-dialog').close();
+      openChat(e.orchestratorId);
+      // Center once the chat panel has slid in and the map has its final size.
+      setTimeout(() => focusTeam(e.teamId), 300);
+      break;
+    case 'team_error':
+      $('td-error').textContent = e.error;
+      $('td-error').hidden = false;
+      $('td-submit').disabled = false;
       break;
     case 'removed':
       agents.delete(e.agentId);
@@ -62,22 +90,29 @@ function onEvent(e) {
     case 'status':
       statuses[e.agentId] = { status: e.status, detail: e.detail };
       updateStation(e.agentId);
+      visitStatus(e.agentId, e.status);
       if (selected === e.agentId) renderComposer();
+      if (hoverId === e.agentId) renderHover();
       break;
     case 'delta':
       streaming[e.agentId] = (streaming[e.agentId] ?? '') + e.text;
+      visitDelta(e.agentId, e.text);
       if (selected === e.agentId) renderStreaming();
       break;
     case 'message': {
       const m = e.msg;
       (chats[m.agentId] ??= []).push(m);
       if (m.from === 'agent') delete streaming[m.agentId];
+      visitMessage(m);
       if (selected === m.agentId) {
         if (m.from === 'agent') document.querySelector('.msg.streaming')?.remove();
         appendMsg(m);
       }
       break;
     }
+    case 'peer':
+      onPeer(e);
+      break;
     case 'approval':
       approvals.set(e.approval.id, e.approval);
       renderMemos();
@@ -91,13 +126,18 @@ function onEvent(e) {
 
 // ---------- office ----------
 
-const orchestrator = () => [...agents.values()].find((a) => a.isOrchestrator);
+const orchOf = (teamId) => [...agents.values()].find((a) => a.teamId === teamId && a.isOrchestrator);
 
 function statusLine(a) {
   const s = statuses[a.id] ?? { status: 'idle', detail: '' };
   switch (s.status) {
     case 'thinking': return 'Thinking…';
-    case 'working': return s.detail === 'typing' ? 'Typing…' : `Using ${s.detail}`;
+    case 'working':
+      if (s.detail === 'typing') return 'Typing…';
+      if (s.detail === 'message_teammate') return 'Messaging a teammate';
+      if (s.detail === 'ask_teammate') return 'Asking a teammate';
+      if (s.detail === 'assign_task') return 'Briefing the team';
+      return `Using ${s.detail}`;
     case 'waiting': return 'Needs your OK';
     case 'error': return 'Hit an error';
     default: return a.role;
@@ -118,7 +158,55 @@ function makeStation(a) {
   el.dataset.name = a.name;
   el.innerHTML = `${stationSVG(a.name, a.isOrchestrator)}<span class="bubble"></span><span class="plaque"><b></b><small></small></span>`;
   el.addEventListener('click', () => openChat(a.id));
+  el.addEventListener('pointerenter', () => showHover(a.id));
+  el.addEventListener('pointerleave', hideHover);
+  el.addEventListener('focus', () => showHover(a.id));
+  el.addEventListener('blur', hideHover);
   return el;
+}
+
+// ---------- hover card ----------
+
+let hoverId = null;
+
+function renderHover() {
+  const a = agents.get(hoverId);
+  const card = $('hovercard');
+  if (!a) return hideHover();
+  const used = a.costUsd ? `≈ $${a.costUsd.toFixed(2)}` : '$0.00';
+  card.innerHTML = `
+    <b>${esc(a.name)}</b>
+    <span>${esc(a.role)}</span>
+    <dl>
+      <dt>Usage</dt><dd>${used}</dd>
+      <dt>Model</dt><dd>${esc(MODEL_NAMES[a.model] ?? a.model)}</dd>
+      ${a.project ? `<dt>Project</dt><dd>${esc(a.project)}</dd>` : ''}
+      ${a.skills?.length ? `<dt>Skills</dt><dd>${a.skills.length}</dd>` : ''}
+      <dt>Now</dt><dd>${esc((statuses[a.id]?.status ?? 'idle') === 'idle' ? 'Free' : statusLine(a))}</dd>
+    </dl>`;
+}
+
+function showHover(id) {
+  hoverId = id;
+  renderHover();
+  const card = $('hovercard');
+  const el = document.querySelector(`.station[data-id="${id}"]`);
+  if (!el) return;
+  card.hidden = false;
+  const r = el.getBoundingClientRect();
+  const cw = card.offsetWidth;
+  const ch = card.offsetHeight;
+  let left = r.right + 8;
+  if (left + cw > innerWidth - 8) left = r.left - cw - 8;
+  left = Math.max(8, left);
+  const top = Math.min(Math.max(8, r.top + r.height * 0.15), innerHeight - ch - 8);
+  card.style.left = `${left}px`;
+  card.style.top = `${top}px`;
+}
+
+function hideHover() {
+  hoverId = null;
+  $('hovercard').hidden = true;
 }
 
 function updateStation(id) {
@@ -138,16 +226,16 @@ function updateStation(id) {
   el.setAttribute('aria-label', `${a.name}, ${a.role}. ${statusLine(a)}. Open chat`);
 }
 
-function emptyDesk() {
+function emptyDesk(teamId) {
+  const boss = orchOf(teamId);
   const el = document.createElement('button');
   el.className = 'station empty';
-  el.dataset.id = 'empty';
+  el.dataset.id = `empty-${teamId}`;
   el.innerHTML = `<svg viewBox="0 0 160 190" class="char" aria-hidden="true">
       <rect x="44" y="84" width="72" height="80" rx="16" fill="#3D4B63" stroke="#1E2A3A" stroke-width="3" stroke-dasharray="7 6"/>
       <rect x="4" y="146" width="152" height="40" rx="6" fill="#2F5D62" stroke="#1E2A3A" stroke-width="3" stroke-dasharray="7 6"/>
-    </svg><span class="plaque"><b>Open desk</b><small>Ask ${orchestrator()?.name ?? 'the orchestrator'} to hire</small></span>`;
+    </svg><span class="plaque"><b>Open desk</b><small>Ask ${esc(boss?.name ?? 'the orchestrator')} to hire</small></span>`;
   el.addEventListener('click', () => {
-    const boss = orchestrator();
     if (!boss) return;
     openChat(boss.id);
     $('input').value = 'I need someone to help with ';
@@ -157,22 +245,89 @@ function emptyDesk() {
 }
 
 function renderOffice() {
-  const team = $('team');
-  const front = $('front');
-  const boss = orchestrator();
-  const workers = [...agents.values()].filter((a) => !a.isOrchestrator).sort((x, y) => x.createdAt - y.createdAt);
+  const list = [...teams.values()].sort((a, b) => a.createdAt - b.createdAt);
+  renderRooms(list);
 
   for (const el of document.querySelectorAll('.station[data-id]')) {
-    if (el.dataset.id !== 'empty' && !agents.has(el.dataset.id)) el.remove();
+    if (!el.classList.contains('empty') && !agents.has(el.dataset.id)) el.remove();
   }
-  for (const a of workers) {
-    if (!team.querySelector(`[data-id="${a.id}"]`)) team.appendChild(makeStation(a));
+  for (const t of list) {
+    const room = roomFor(t.id);
+    const row = room.querySelector('.team');
+    const front = room.querySelector('.front');
+    const members = [...agents.values()].filter((a) => a.teamId === t.id);
+    const workers = members.filter((a) => !a.isOrchestrator).sort((x, y) => x.createdAt - y.createdAt);
+    for (const a of workers) {
+      if (!row.querySelector(`[data-id="${a.id}"]`)) row.appendChild(makeStation(a));
+    }
+    row.querySelector('.station.empty')?.remove();
+    row.appendChild(emptyDesk(t.id));
+    const boss = members.find((a) => a.isOrchestrator);
+    if (boss && !front.querySelector(`[data-id="${boss.id}"]`)) front.appendChild(makeStation(boss));
+    fitStage(room);
   }
-  team.querySelector('[data-id="empty"]')?.remove();
-  team.appendChild(emptyDesk());
-  if (boss && !front.querySelector(`[data-id="${boss.id}"]`)) front.appendChild(makeStation(boss));
   for (const a of agents.values()) updateStation(a.id);
+  const people = agents.size;
+  $('team-count').textContent = `${list.length} ${list.length === 1 ? 'team' : 'teams'}, ${people} ${people === 1 ? 'person' : 'people'}`;
 }
+
+// Shrink a team's desks until they all fit inside its room.
+function fitStage(room) {
+  const stage = room.querySelector('.stage');
+  const floor = room.querySelector('.floor');
+  stage.style.zoom = 1;
+  const cs = getComputedStyle(floor);
+  const availH = floor.clientHeight - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom);
+  const availW = floor.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
+  stage.style.zoom = Math.max(0.35, Math.min(1, availH / stage.scrollHeight, availW / stage.scrollWidth));
+}
+
+// ---------- teams: build and rename ----------
+
+const NAME_IDEAS = ['Sofia', 'Noah', 'Amira', 'Lucas', 'Hana', 'Elias', 'Zara', 'Felix', 'Lina', 'Jonas', 'Nora', 'Adam', 'Mila', 'Rami', 'Ines', 'Theo'];
+let dialogMode = null; // { kind: 'new', col, row } or { kind: 'rename', teamId }
+
+function openTeamDialog(mode) {
+  dialogMode = mode;
+  const f = $('team-form');
+  const isNew = mode.kind === 'new';
+  f.reset();
+  f.classList.toggle('renaming', !isNew);
+  for (const el of f.querySelectorAll('.new-only input')) el.required = isNew;
+  $('td-title').textContent = isNew ? 'Build a new team' : 'Rename team';
+  $('td-submit').textContent = isNew ? 'Build team' : 'Save name';
+  $('td-submit').disabled = false;
+  $('td-error').hidden = true;
+  if (isNew) {
+    const taken = new Set([...agents.values()].map((a) => a.name.toLowerCase()));
+    f.orchestratorName.value = NAME_IDEAS.find((n) => !taken.has(n.toLowerCase())) ?? '';
+  } else {
+    f.name.value = teams.get(mode.teamId)?.name ?? '';
+  }
+  $('team-dialog').showModal();
+  f.name.focus();
+}
+
+$('team-form').addEventListener('submit', (e) => {
+  e.preventDefault();
+  const f = e.target;
+  if (dialogMode?.kind === 'new') {
+    $('td-submit').disabled = true;
+    sendWS({
+      type: 'create_team',
+      col: dialogMode.col,
+      row: dialogMode.row,
+      name: f.name.value,
+      project: f.project.value,
+      orchestratorName: f.orchestratorName.value,
+      model: f.model.value,
+    });
+  } else if (dialogMode?.kind === 'rename') {
+    sendWS({ type: 'rename_team', teamId: dialogMode.teamId, name: f.name.value });
+    $('team-dialog').close();
+  }
+});
+$('td-cancel').addEventListener('click', () => $('team-dialog').close());
 
 // ---------- memos ----------
 
@@ -197,7 +352,7 @@ function renderMemos() {
         <h3>${esc(a.title)}</h3>
         <div class="hire">
           ${portraitSVG(d.name)}
-          <div><b>${esc(d.name)}</b>${esc(d.role)}<br><span class="chip">${esc(MODEL_NAMES[d.model] ?? d.model)}</span> <span class="chip">${esc(d.project)}</span></div>
+          <div><b>${esc(d.name)}</b>${esc(d.role)}<br><span class="chip">${esc(MODEL_NAMES[d.model] ?? d.model)}</span> <span class="chip">${esc(d.project)}</span>${d.team ? ` <span class="chip">${esc(d.team)}</span>` : ''}</div>
         </div>
         ${skillChips(d.skills)}
         <p>${esc(a.detail)}</p>
@@ -271,8 +426,12 @@ function md(text) {
 function msgEl(m) {
   const el = document.createElement('div');
   el.className = `msg ${m.from}`;
-  if (m.from === 'boss') {
-    const boss = orchestrator();
+  if (m.from === 'peer') {
+    const who = agents.get(m.fromId);
+    const label = m.mode === 'ask' ? 'Question from' : 'Message from';
+    el.innerHTML = `<span class="from">${label} ${esc(who?.name ?? 'a teammate')}</span>${md(m.text)}`;
+  } else if (m.from === 'boss') {
+    const boss = orchOf(agents.get(m.agentId)?.teamId);
     el.innerHTML = `<span class="from">Task from ${esc(boss?.name ?? 'the orchestrator')}</span>${md(m.text)}`;
   } else if (m.from === 'tool') {
     el.textContent = m.text;
@@ -315,6 +474,7 @@ function renderHead() {
   $('p-portrait').innerHTML = portraitSVG(a.name, a.isOrchestrator);
   $('p-name').textContent = a.name;
   $('p-role').textContent = a.role;
+  $('p-team').textContent = teams.get(a.teamId)?.name ?? '';
   $('p-model').textContent = MODEL_NAMES[a.model] ?? a.model;
   $('p-project').textContent = a.project ?? '';
   $('p-cost').textContent = a.costUsd ? `≈ $${a.costUsd.toFixed(2)} of usage` : '';
@@ -375,7 +535,7 @@ function openChat(id) {
     log.innerHTML = `<p class="empty-log">${
       a.isOrchestrator
         ? `Tell ${esc(a.name)} what you want built. ${esc(a.name)} asks you before hiring anyone.`
-        : `${esc(a.name)} hasn't done anything yet. Give them a task, or ask ${esc(orchestrator()?.name)} to.`
+        : `${esc(a.name)} hasn't done anything yet. Give them a task, or ask ${esc(orchOf(a.teamId)?.name)} to.`
     }</p>`;
   }
   for (const m of list) log.appendChild(msgEl(m));
@@ -383,6 +543,7 @@ function openChat(id) {
   scrollLog();
   for (const a of agents.values()) updateStation(a.id);
   if (matchMedia('(min-width: 761px)').matches) $('input').focus();
+  setTimeout(refreshCamera, 260);
 }
 
 function closeChat() {
@@ -390,6 +551,7 @@ function closeChat() {
   document.body.classList.remove('chatting');
   $('panel').hidden = true;
   for (const a of agents.values()) updateStation(a.id);
+  setTimeout(refreshCamera, 260);
 }
 
 $('p-close').addEventListener('click', closeChat);
@@ -422,4 +584,41 @@ $('p-dismiss').addEventListener('click', () => {
   sendWS({ type: 'dismiss', agentId: selected });
 });
 
+// Open the page with #demo to watch a pretend exchange. Nothing is sent to the agents.
+let demoPlayed = false;
+function runDemo() {
+  if (demoPlayed || location.hash !== '#demo') return;
+  demoPlayed = true;
+  const workers = [...agents.values()].filter((a) => !a.isOrchestrator);
+  const find = (n) => workers.find((a) => a.name === n);
+  const dev = find('Leo') ?? workers[0];
+  const designer = find('Mario') ?? workers.find((a) => a !== dev);
+  if (!dev || !designer) return;
+  const say = async (id, text) => {
+    visitMessage({ from: 'peer', agentId: id });
+    for (const word of text.split(' ')) {
+      visitDelta(id, word + ' ');
+      await new Promise((r) => setTimeout(r, 70));
+    }
+    visitStatus(id, 'idle');
+  };
+  onPeer({
+    fromId: dev.id,
+    toId: designer.id,
+    mode: 'ask',
+    text: `Hey ${designer.name}, I finished the hero section. Can you check the type and colours before I move on?`,
+  });
+  setTimeout(() => say(designer.id, 'Nice start! Give the headline more weight, and the CTA colour fights with the background. Try a deeper tone.'), 3000);
+  setTimeout(() => {
+    onPeer({ fromId: designer.id, toId: dev.id, mode: 'message', text: 'Sent you two mockup tweaks in the shared folder.' });
+    setTimeout(() => say(dev.id, 'Got them, applying both now.'), 2500);
+  }, 13000);
+}
+
+initVisits((id) => agents.get(id));
+let cameraRestored = initWorld({
+  onLot: (col, row) => openTeamDialog({ kind: 'new', col, row }),
+  onSign: (teamId) => openTeamDialog({ kind: 'rename', teamId }),
+});
+refreshCamera();
 connect();

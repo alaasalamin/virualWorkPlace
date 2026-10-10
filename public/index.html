@@ -10,21 +10,54 @@
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
-  <main class="office" id="office">
-    <div class="wall">
-      <div class="sign">Agent Office</div>
-      <div class="window" aria-hidden="true"><span></span><span></span><span></span><span></span></div>
-      <div class="plant" aria-hidden="true">
-        <svg viewBox="0 0 60 90"><path d="M30 60 C10 50 6 26 14 14 C22 30 28 40 30 60 Z" fill="#2BB673" stroke="#1E2A3A" stroke-width="3" stroke-linejoin="round"/><path d="M30 60 C50 50 54 22 46 8 C38 26 32 40 30 60 Z" fill="#3FCB86" stroke="#1E2A3A" stroke-width="3" stroke-linejoin="round"/><path d="M16 60 L44 60 L40 86 L20 86 Z" fill="#F7A072" stroke="#1E2A3A" stroke-width="3" stroke-linejoin="round"/></svg>
-      </div>
-    </div>
-    <div class="floor">
-      <div class="team" id="team"></div>
-      <div class="front" id="front"></div>
-    </div>
-    <div class="memos" id="memos" aria-live="polite"></div>
-    <div class="offline" id="offline" hidden>Can't reach the office server. Start it with <code>npm start</code> in agent-office. Retrying…</div>
+  <main class="viewport" id="viewport" aria-label="Office map. Drag or scroll to move around.">
+    <div class="world" id="world"></div>
   </main>
+
+  <header class="hud-title">
+    <h1>Agent Office</h1>
+    <p id="team-count"></p>
+  </header>
+
+  <nav class="map-tools" aria-label="Map">
+    <div class="zoom-btns">
+      <button class="icon-btn" id="zoom-out" aria-label="Zoom out">−</button>
+      <button class="icon-btn" id="zoom-in" aria-label="Zoom in">+</button>
+    </div>
+    <canvas class="minimap" id="minimap" width="220" height="150" aria-label="Minimap. Click to jump there."></canvas>
+  </nav>
+
+  <div class="memos" id="memos" aria-live="polite"></div>
+  <div class="hovercard" id="hovercard" hidden role="tooltip"></div>
+  <div class="offline" id="offline" hidden>Can't reach the office server. Start it with <code>npm start</code> in agent-office. Retrying…</div>
+
+  <dialog class="team-dialog" id="team-dialog">
+    <form method="dialog" id="team-form">
+      <h2 id="td-title">Build a new team</h2>
+      <label>Team name
+        <input name="name" required maxlength="40" autocomplete="off" placeholder="e.g. Mobile team">
+      </label>
+      <label class="new-only">Project
+        <input name="project" maxlength="48" autocomplete="off" placeholder="e.g. coffee-app">
+        <small>Folder in workplace/projects that the team works in.</small>
+      </label>
+      <label class="new-only">Orchestrator's name
+        <input name="orchestratorName" maxlength="30" autocomplete="off">
+      </label>
+      <label class="new-only">Orchestrator's model
+        <select name="model">
+          <option value="fable">Fable (most capable, uses limits fastest)</option>
+          <option value="opus">Opus</option>
+          <option value="sonnet">Sonnet</option>
+        </select>
+      </label>
+      <p class="form-error" id="td-error" hidden></p>
+      <div class="actions">
+        <button type="submit" class="btn go" id="td-submit">Build team</button>
+        <button type="button" class="btn no" id="td-cancel">Cancel</button>
+      </div>
+    </form>
+  </dialog>
 
   <aside class="panel" id="panel" hidden aria-label="Chat">
     <header class="panel-head">
@@ -32,7 +65,7 @@
       <div class="panel-who">
         <h2 id="p-name"></h2>
         <p id="p-role"></p>
-        <p class="panel-meta"><span class="chip" id="p-model"></span><span class="chip" id="p-project"></span><span class="usage" id="p-cost" title="Estimated API-equivalent cost of this agent's work. On a Max plan this comes out of your usage limits, not money."></span></p>
+        <p class="panel-meta"><span class="chip" id="p-team"></span><span class="chip" id="p-model"></span><span class="chip" id="p-project"></span><span class="usage" id="p-cost" title="Estimated API-equivalent cost of this agent's work. On a Max plan this comes out of your usage limits, not money."></span></p>
       </div>
       <button class="icon-btn" id="p-close" aria-label="Close chat">✕</button>
     </header>

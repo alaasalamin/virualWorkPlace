@@ -155,3 +155,23 @@ export function portraitSVG(name, isOrchestrator = false) {
   const l = lookFor(name, isOrchestrator);
   return `<svg viewBox="30 18 100 140" class="portrait" aria-hidden="true">${person(l)}</svg>`;
 }
+
+// Standing figure used when someone walks over to a teammate's desk.
+export function walkerSVG(name, isOrchestrator = false) {
+  const l = lookFor(name, isOrchestrator);
+  const ink = `stroke="${INK}" stroke-width="3" stroke-linejoin="round" stroke-linecap="round"`;
+  const leg = (cls, x, foot) => `<g class="leg ${cls}">
+      <rect x="${x}" y="146" width="18" height="54" rx="8" fill="#3D4B63" ${ink}/>
+      <ellipse cx="${foot}" cy="202" rx="13" ry="7" fill="${INK}"/></g>`;
+  const arm = (cls, d, hx) => `<g class="arm ${cls}">
+      <path d="${d}" fill="none" stroke="${INK}" stroke-width="17" stroke-linecap="round"/>
+      <path d="${d}" fill="none" stroke="${l.shirt}" stroke-width="11" stroke-linecap="round"/>
+      <circle cx="${hx}" cy="166" r="6.5" fill="${l.skin}" ${ink}/></g>`;
+  return `<svg viewBox="20 16 120 196" class="walker-svg" aria-hidden="true">
+    ${leg('leg-l', 60, 66)}
+    ${leg('leg-r', 82, 94)}
+    ${person(l)}
+    ${arm('arm-l', 'M44 128 C40 140 40 152 42 162', 42)}
+    ${arm('arm-r', 'M116 128 C120 140 120 152 118 162', 118)}
+  </svg>`;
+}

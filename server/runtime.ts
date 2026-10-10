@@ -3,7 +3,7 @@ import type { CanUseTool, Options, SDKMessage } from '@anthropic-ai/claude-agent
 import { z } from 'zod';
 import { resolve, sep } from 'node:path';
 import {
-  MODELS, PROJECTS_DIR, agents, addAgent, addChat, findAgentByName, getAgent, orchestrator, statuses, updateAgent,
+  MODELS, PROJECTS_DIR, addAgent, addChat, findAgentByName, getAgent, getTeam, orchestratorOf, statuses, teamMembers, updateAgent,
 } from './store.ts';
 import type { Agent, ChatMsg, ModelKey, Status } from './store.ts';
 import { requestApproval } from './approvals.ts';
@@ -13,7 +13,17 @@ export type ServerEvent =
   | { type: 'agent'; agent: Agent }
   | { type: 'status'; agentId: string; status: Status; detail: string }
   | { type: 'delta'; agentId: string; text: string }
-  | { type: 'message'; msg: ChatMsg };
+  | { type: 'message'; msg: ChatMsg }
+  | { type: 'peer'; fromId: string; toId: string; mode: 'message' | 'ask' | 'assign'; text: string };
+
+// Who a turn's message came from. Teammate messages carry a hop count so chains can't loop forever.
+export type Origin =
+  | { kind: 'user' }
+  | { kind: 'boss' }
+  | { kind: 'peer'; fromId: string; depth: number; mode: 'message' | 'ask' };
+
+const MAX_PEER_DEPTH = 3;
+const PEER_LIMIT_PER_HOUR = 20;
 
 let broadcast: (e: ServerEvent) => void = () => {};
 export function onRuntimeEvent(fn: typeof broadcast) {
@@ -25,8 +35,8 @@ function setStatus(agentId: string, status: Status, detail = '') {
   broadcast({ type: 'status', agentId, status, detail });
 }
 
-function chat(agentId: string, from: ChatMsg['from'], text: string) {
-  broadcast({ type: 'message', msg: addChat(agentId, from, text) });
+function chat(agentId: string, from: ChatMsg['from'], text: string, extra?: Pick<ChatMsg, 'fromId' | 'mode'>) {
+  broadcast({ type: 'message', msg: addChat(agentId, from, text, extra) });
 }
 
 // ---------- permissions ----------
@@ -50,7 +60,7 @@ function summarize(toolName: string, input: Record<string, unknown>) {
 function permissionsFor(agent: Agent): CanUseTool {
   return async (toolName, input, { signal, decisionReason }) => {
     const fresh = getAgent(agent.id) ?? agent;
-    if (AUTO_ALLOW.has(toolName) || toolName.startsWith('mcp__office__') || fresh.alwaysAllow.includes(toolName)) {
+    if (AUTO_ALLOW.has(toolName) || toolName.startsWith('mcp__office__') || toolName.startsWith('mcp__team__') || fresh.alwaysAllow.includes(toolName)) {
       return { behavior: 'allow', updatedInput: input };
     }
     if (EDIT_TOOLS.has(toolName) && inside(input.file_path ?? input.notebook_path, fresh.cwd)) {
@@ -78,22 +88,35 @@ function permissionsFor(agent: Agent): CanUseTool {
 // ---------- prompts ----------
 
 function workerPrompt(a: Agent) {
-  const boss = orchestrator();
-  return `You are ${a.name}, a ${a.role} working in a small virtual office. ${a.personality}
+  const boss = orchestratorOf(a.teamId);
+  const team = getTeam(a.teamId);
+  return `You are ${a.name}, a ${a.role} on ${team?.name ?? 'a team'} in a virtual office of AI agents. ${a.personality}
 You were hired by ${boss.name}, the team's orchestrator, who will hand you tasks. The human owner of the office may also talk to you directly.
-Your project folder is ${a.cwd}. Do all your work inside it.
+Your project folder is ${a.cwd}. Do all your work inside it. You can read other teammates' project folders in ${PROJECTS_DIR}, but only edit your own.
+
+Working with teammates:
+- Use list_team to see who's here and what they do.
+- When you finish something a teammate's expertise should check, send it for review with message_teammate. For example, a page you built goes to the designer, and auth or payment code goes to the security reviewer. Say exactly what to look at (file paths) and what kind of feedback you want.
+- When you review someone's work, send specific, actionable feedback with message_teammate: what to change, where, and why.
+- Use ask_teammate only when you need an answer before you can continue.
+- When feedback arrives, apply what makes sense. If you disagree, say why. Tell the reviewer when it's ready for a re-check only if the change was significant.
+- Don't send thanks, greetings or acknowledgements. Every message should move the work forward.
+
 Speak like a friendly colleague, in first person. Keep chat replies short. When you finish a task, end with a brief summary of what you did and anything that still needs attention.`;
 }
 
 function orchestratorPrompt(a: Agent) {
-  return `You are ${a.name}, the orchestrator of a small virtual office of AI agents. ${a.personality}
+  const team = getTeam(a.teamId);
+  return `You are ${a.name}, the orchestrator of ${team?.name ?? 'a team'} in a virtual office of AI agents. ${a.personality}
 You talk with the office owner (the user), understand what they want, and get it done through your team.
+Your team's project is "${team?.project}" (folder ${PROJECTS_DIR}/${team?.project}). New hires work there unless the owner asks for a separate project. Other teams in the office have their own orchestrators and projects; you only manage your own team.
 
 How you work:
-- Use list_team to see who is in the office and what they are doing.
-- When the team lacks a skill a task needs, call propose_agent to hire someone. Every hire needs the owner's approval, so explain briefly why in the reason field. Give each hire a real human first name that isn't already taken, a clear role, a short personality, a model, and a project name (one folder per project; teammates on the same project share it).
+- Use list_team to see who is on your team and what they are doing.
+- When the team lacks a skill a task needs, call propose_agent to hire someone. Every hire needs the owner's approval, so explain briefly why in the reason field. Give each hire a real human first name that isn't already taken, a clear role, a short personality, and a model. Leave project empty to use the team's project.
 - Choose models deliberately: "haiku" for simple or repetitive work, "sonnet" for most engineering, "opus" for hard design or debugging. Never hire a "fable" worker unless the owner asks.
 - Teammates can have skills: packaged expertise such as frontend design. Use list_skills to see what's available, give fitting skills when you hire (skills field), and use request_skills to add skills to someone already on the team. The owner approves both.
+- Teammates can message each other directly, for example to request a design review or send feedback. You'll see it in their chats. You may also receive messages from them.
 - Use assign_task to hand a teammate a concrete, self-contained task. They don't see this conversation, so include all context they need. You get their report back when they finish.
 - Don't hire more people than the work needs. Reuse existing teammates when they fit.
 - You can read files in the projects folder (${PROJECTS_DIR}) to check work, but you don't edit files yourself.
@@ -102,20 +125,21 @@ Keep replies to the owner short and conversational. Tell them what you're doing 
 
 // ---------- orchestrator tools ----------
 
-function officeServer() {
+function officeServer(boss: Agent) {
+  const teamId = boss.teamId;
+  // Finds a worker on this orchestrator's team by name.
+  const member = (name: string) => {
+    const a = findAgentByName(name);
+    return a && a.teamId === teamId && !a.isOrchestrator ? a : undefined;
+  };
   return createSdkMcpServer({
     name: 'office',
     version: '1.0.0',
     alwaysLoad: true,
     tools: [
-      tool('list_team', 'List everyone in the office with their role, model, project and current status.', {}, async () => {
-        const lines = agents().map((a) => {
-          const s = statuses.get(a.id)?.status ?? 'idle';
-          const sk = a.skills.length ? a.skills.join(', ') : 'none';
-          return `- ${a.name}: ${a.role}${a.isOrchestrator ? ' (you)' : ''} | model ${a.model} | project ${a.project ?? '-'} | skills ${sk} | ${s}`;
-        });
-        return { content: [{ type: 'text', text: lines.join('\n') }] };
-      }),
+      tool('list_team', 'List everyone on your team with their role, project, skills and current status.', {}, async () => ({
+        content: [{ type: 'text', text: teamLines(boss.id, teamId) }],
+      })),
       tool('list_skills', 'List the skills teammates can be given, with what each one is for.', {}, async () => {
         const cat = catalog();
         const text = cat.length ? cat.map((s) => `- ${s.id}: ${s.description}`).join('\n') : 'No skills are installed.';
@@ -130,9 +154,9 @@ function officeServer() {
           reason: z.string().describe('Why they need these skills, shown to the owner'),
         },
         async ({ agent_name, skills, reason }) => {
-          const a = findAgentByName(agent_name);
-          if (!a || a.isOrchestrator) {
-            return { content: [{ type: 'text', text: `No teammate named ${agent_name}. Use list_team.` }], isError: true };
+          const a = member(agent_name);
+          if (!a) {
+            return { content: [{ type: 'text', text: `No one named ${agent_name} on your team. Use list_team.` }], isError: true };
           }
           const { ids, unknown } = resolveSkills(skills);
           if (unknown.length) {
@@ -140,7 +164,6 @@ function officeServer() {
           }
           const added = ids.filter((id) => !a.skills.includes(id));
           if (!added.length) return { content: [{ type: 'text', text: `${a.name} already has those skills.` }] };
-          const boss = orchestrator();
           setStatus(boss.id, 'waiting', `wants skills for ${a.name}`);
           const d = await requestApproval({
             kind: 'skills',
@@ -167,36 +190,36 @@ function officeServer() {
           role: z.string().describe('Job title, e.g. "Frontend Developer"'),
           personality: z.string().describe('One or two sentences on how they work and talk'),
           model: z.enum(['haiku', 'sonnet', 'opus', 'fable']),
-          project: z.string().describe('Project folder name they will work in'),
+          project: z.string().optional().describe("Leave empty to use the team's project"),
           skills: z.array(z.string()).optional().describe('Skill ids from list_skills that fit the role'),
           reason: z.string().describe('Why the team needs this person, shown to the owner'),
         },
         async (args) => {
           if (findAgentByName(args.name)) {
-            return { content: [{ type: 'text', text: `Someone named ${args.name} already works here. Pick another name.` }], isError: true };
+            return { content: [{ type: 'text', text: `Someone named ${args.name} already works in the office. Pick another name.` }], isError: true };
           }
           const { ids: skillIds, unknown } = resolveSkills(args.skills ?? []);
           if (unknown.length) {
             return { content: [{ type: 'text', text: `Unknown skills: ${unknown.join(', ')}. Use list_skills.` }], isError: true };
           }
-          const boss = orchestrator();
+          const project = args.project?.trim() || getTeam(teamId)?.project || null;
           setStatus(boss.id, 'waiting', `wants to hire ${args.name}`);
           const d = await requestApproval({
             kind: 'hire',
             agentId: boss.id,
             title: `${boss.name} wants to hire ${args.name}`,
             detail: args.reason,
-            data: { ...args, skills: skillIds },
+            data: { ...args, project, skills: skillIds, team: getTeam(teamId)?.name },
           });
           setStatus(boss.id, 'thinking');
           if (!d.approved) {
             chat(boss.id, 'system', `You declined hiring ${args.name}${d.note ? `: ${d.note}` : ''}.`);
             return { content: [{ type: 'text', text: `The owner rejected hiring ${args.name}.${d.note ? ` Their note: ${d.note}` : ''}` }] };
           }
-          const agent = addAgent({ ...args, skills: skillIds, model: args.model as ModelKey, isOrchestrator: false });
+          const agent = addAgent({ ...args, teamId, project, skills: skillIds, model: args.model as ModelKey, isOrchestrator: false });
           setStatus(agent.id, 'idle');
           broadcast({ type: 'agent', agent });
-          chat(boss.id, 'system', `${agent.name} joined the office as ${agent.role}.`);
+          chat(boss.id, 'system', `${agent.name} joined the team as ${agent.role}.`);
           return {
             content: [{ type: 'text', text: `Approved. ${agent.name} is hired and works in ${agent.cwd}.${d.note ? ` Owner's note: ${d.note}` : ''}` }],
           };
@@ -207,11 +230,12 @@ function officeServer() {
         'Give a teammate a task and wait for their report. Include all context; they cannot see your conversation.',
         { agent_name: z.string(), task: z.string() },
         async ({ agent_name, task }) => {
-          const a = findAgentByName(agent_name);
-          if (!a || a.isOrchestrator) {
-            return { content: [{ type: 'text', text: `No teammate named ${agent_name}. Use list_team.` }], isError: true };
+          const a = member(agent_name);
+          if (!a) {
+            return { content: [{ type: 'text', text: `No one named ${agent_name} on your team. Use list_team.` }], isError: true };
           }
-          const report = await send(a.id, task, 'boss');
+          broadcast({ type: 'peer', fromId: boss.id, toId: a.id, mode: 'assign', text: task });
+          const report = await send(a.id, task, { kind: 'boss' });
           return { content: [{ type: 'text', text: `${a.name}'s report:\n${report || '(no text reply)'}` }] };
         },
       ),
@@ -219,15 +243,110 @@ function officeServer() {
   });
 }
 
+function teamLines(selfId: string, teamId: string) {
+  return teamMembers(teamId)
+    .map((a) => {
+      const s = statuses.get(a.id)?.status ?? 'idle';
+      const sk = a.skills.length ? a.skills.join(', ') : 'none';
+      const where = a.isOrchestrator ? 'orchestrator' : `project ${a.project ?? '-'}`;
+      return `- ${a.name}${a.id === selfId ? ' (you)' : ''}: ${a.role} | ${where} | skills ${sk} | ${s}`;
+    })
+    .join('\n');
+}
+
+// ---------- teammate messaging (workers) ----------
+
+const sentLog = new Map<string, number[]>();
+
+function checkPeer(from: Agent, toName: string, depth: number): Agent | string {
+  const to = findAgentByName(toName);
+  if (!to) return `No teammate named ${toName}. Use list_team.`;
+  if (to.id === from.id) return "You can't message yourself.";
+  if (to.teamId !== from.teamId) return `${to.name} is on another team. You can only message your own teammates.`;
+  if (depth >= MAX_PEER_DEPTH) {
+    return 'This back-and-forth has gone on long enough. Finish with what you have and summarise any open points in your reply.';
+  }
+  const hourAgo = Date.now() - 3_600_000;
+  const recent = (sentLog.get(from.id) ?? []).filter((t) => t > hourAgo);
+  if (recent.length >= PEER_LIMIT_PER_HOUR) return "You've sent a lot of messages this hour. Finish your work and report instead.";
+  sentLog.set(from.id, [...recent, Date.now()]);
+  return to;
+}
+
+function teamServer(self: Agent, depth: number) {
+  const text = (t: string, isError = false) => ({ content: [{ type: 'text' as const, text: t }], isError });
+  return createSdkMcpServer({
+    name: 'team',
+    version: '1.0.0',
+    alwaysLoad: true,
+    tools: [
+      tool('list_team', 'See who works in the office: roles, projects, skills and whether they are busy.', {}, async () =>
+        text(teamLines(self.id, self.teamId)),
+      ),
+      tool(
+        'message_teammate',
+        "Send a teammate a message without waiting: a review request, feedback on their work, or a handoff. They act on it when they're free; if they reply, it arrives as a new message.",
+        {
+          name: z.string().describe("The teammate's first name"),
+          message: z.string().describe('Self-contained message. Include file paths and exactly what you want.'),
+        },
+        async ({ name, message }) => {
+          const to = checkPeer(self, name, depth);
+          if (typeof to === 'string') return text(to, true);
+          broadcast({ type: 'peer', fromId: self.id, toId: to.id, mode: 'message', text: message });
+          send(to.id, message, { kind: 'peer', fromId: self.id, depth: depth + 1, mode: 'message' }).catch(() => {});
+          return text(`Sent to ${to.name}. Carry on with your work; any reply will come as a new message.`);
+        },
+      ),
+      tool(
+        'ask_teammate',
+        'Ask a teammate a question and wait for the answer. Only use this when you cannot continue without it.',
+        { name: z.string(), question: z.string() },
+        async ({ name, question }) => {
+          const to = checkPeer(self, name, depth);
+          if (typeof to === 'string') return text(to, true);
+          if (isBusy(to.id)) {
+            // Waiting on a busy teammate could deadlock, so leave the question in their queue instead.
+            broadcast({ type: 'peer', fromId: self.id, toId: to.id, mode: 'message', text: question });
+            send(to.id, question, { kind: 'peer', fromId: self.id, depth: depth + 1, mode: 'message' }).catch(() => {});
+            return text(`${to.name} is busy, so your question was left as a message. Continue without the answer if you can.`);
+          }
+          broadcast({ type: 'peer', fromId: self.id, toId: to.id, mode: 'ask', text: question });
+          const answer = await send(to.id, question, { kind: 'peer', fromId: self.id, depth: depth + 1, mode: 'ask' });
+          return text(`${to.name} answered:\n${answer || '(no answer)'}`);
+        },
+      ),
+    ],
+  });
+}
+
+function promptFor(text: string, origin: Origin) {
+  if (origin.kind !== 'peer') return text;
+  const s = getAgent(origin.fromId);
+  const who = s ? `${s.name} (${s.role})` : 'A teammate';
+  if (origin.mode === 'ask') {
+    return `${who} asks you:\n\n${text}\n\nAnswer in your reply; it goes straight back to them. Keep it focused.`;
+  }
+  return `Message from ${who}:\n\n${text}\n\nThis is from a teammate, not the owner. Act on it if it's relevant to your work. Use message_teammate to reply only if they need something back from you.`;
+}
+
 // ---------- running turns ----------
 
 const queues = new Map<string, Promise<unknown>>();
 const controllers = new Map<string, AbortController>();
+const pendingTurns = new Map<string, number>();
+
+// True while the agent has a turn running or waiting in its queue.
+export const isBusy = (agentId: string) => (pendingTurns.get(agentId) ?? 0) > 0;
 
 // Messages to one agent run one at a time, in order.
-export function send(agentId: string, text: string, from: 'user' | 'boss'): Promise<string> {
+export function send(agentId: string, text: string, origin: Origin): Promise<string> {
+  pendingTurns.set(agentId, (pendingTurns.get(agentId) ?? 0) + 1);
   const prev = queues.get(agentId) ?? Promise.resolve();
-  const next = prev.catch(() => {}).then(() => runTurn(agentId, text, from));
+  const next = prev
+    .catch(() => {})
+    .then(() => runTurn(agentId, text, origin))
+    .finally(() => pendingTurns.set(agentId, (pendingTurns.get(agentId) ?? 1) - 1));
   queues.set(agentId, next);
   return next;
 }
@@ -245,10 +364,14 @@ function childEnv() {
   return env;
 }
 
-async function runTurn(agentId: string, text: string, from: 'user' | 'boss', retried = false): Promise<string> {
+async function runTurn(agentId: string, text: string, origin: Origin, retried = false): Promise<string> {
   const agent = getAgent(agentId);
   if (!agent) return '';
-  if (!retried) chat(agentId, from, text);
+  if (!retried) {
+    if (origin.kind === 'peer') chat(agentId, 'peer', text, { fromId: origin.fromId, mode: origin.mode });
+    else chat(agentId, origin.kind, text);
+  }
+  const depth = origin.kind === 'peer' ? origin.depth : 0;
   updateAgent(agentId, { busy: true });
   setStatus(agentId, 'thinking');
 
@@ -270,11 +393,14 @@ async function runTurn(agentId: string, text: string, from: 'user' | 'boss', ret
     options.systemPrompt = orchestratorPrompt(agent);
     options.tools = ['Read', 'Glob', 'Grep'];
     options.additionalDirectories = [PROJECTS_DIR];
-    options.mcpServers = { office: officeServer() };
+    options.mcpServers = { office: officeServer(agent) };
     options.allowedTools = ['list_team', 'list_skills', 'propose_agent', 'request_skills', 'assign_task'].map((t) => `mcp__office__${t}`);
     options.skills = [];
   } else {
     options.systemPrompt = { type: 'preset', preset: 'claude_code', append: workerPrompt(agent) };
+    options.additionalDirectories = [PROJECTS_DIR];
+    options.mcpServers = { team: teamServer(agent, depth) };
+    options.allowedTools = ['list_team', 'message_teammate', 'ask_teammate'].map((t) => `mcp__team__${t}`);
     // Load only the plugins that hold this agent's skills, and enable only those skills.
     const mine = catalog().filter((s) => agent.skills.includes(s.id));
     options.plugins = [...new Set(mine.map((s) => s.pluginPath))].map((path) => ({ type: 'local' as const, path }));
@@ -283,7 +409,7 @@ async function runTurn(agentId: string, text: string, from: 'user' | 'boss', ret
 
   const texts: string[] = [];
   try {
-    for await (const m of query({ prompt: text, options }) as AsyncIterable<SDKMessage>) {
+    for await (const m of query({ prompt: promptFor(text, origin), options }) as AsyncIterable<SDKMessage>) {
       handle(agent, m, texts);
     }
   } catch (err) {
@@ -293,7 +419,7 @@ async function runTurn(agentId: string, text: string, from: 'user' | 'boss', ret
     } else if (agent.sessionId && !retried) {
       // The saved session may be gone; start a fresh one.
       updateAgent(agentId, { sessionId: null });
-      return runTurn(agentId, text, from, true);
+      return runTurn(agentId, text, origin, true);
     } else {
       chat(agentId, 'system', `Error: ${msg}`);
       setStatus(agentId, 'error', msg);
@@ -317,7 +443,7 @@ function handle(agent: Agent, m: SDKMessage, texts: string[]) {
     case 'stream_event': {
       const e = m.event;
       if (e.type === 'content_block_start') {
-        if (e.content_block.type === 'tool_use') setStatus(agent.id, 'working', e.content_block.name.replace('mcp__office__', ''));
+        if (e.content_block.type === 'tool_use') setStatus(agent.id, 'working', e.content_block.name.replace(/^mcp__(office|team)__/, ''));
         else if (e.content_block.type === 'thinking') setStatus(agent.id, 'thinking');
         else if (e.content_block.type === 'text') setStatus(agent.id, 'working', 'typing');
       } else if (e.type === 'content_block_delta' && e.delta.type === 'text_delta') {
@@ -332,11 +458,13 @@ function handle(agent: Agent, m: SDKMessage, texts: string[]) {
           chat(agent.id, 'agent', b.text);
         } else if (b.type === 'tool_use') {
           const input = (b.input ?? {}) as Record<string, unknown>;
-          const name = b.name.replace('mcp__office__', '');
+          const name = b.name.replace(/^mcp__(office|team)__/, '');
           let line = `${name}: ${summarize(b.name, input)}`;
           if (name === 'assign_task') line = `→ ${input.agent_name}: ${String(input.task).slice(0, 300)}`;
           if (name === 'propose_agent') line = `proposes hiring ${input.name} (${input.role})`;
           if (name === 'list_team') line = 'checks the team';
+          if (name === 'message_teammate') line = `→ ${input.name}: ${String(input.message).slice(0, 300)}`;
+          if (name === 'ask_teammate') line = `asks ${input.name}: ${String(input.question).slice(0, 300)}`;
           chat(agent.id, 'tool', line);
         }
       }

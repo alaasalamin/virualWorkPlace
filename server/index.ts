@@ -2,7 +2,11 @@ import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { join, extname, normalize, sep } from 'node:path';
 import { WebSocketServer, WebSocket } from 'ws';
-import { ROOT, load, flush, agents, chats, getAgent, removeAgent, statuses, updateAgent } from './store.ts';
+import {
+  ROOT, MODELS, load, flush, agents, chats, createTeam, findAgentByName, getAgent, removeAgent, statuses, teamAt, teams,
+  updateAgent, updateTeam,
+} from './store.ts';
+import type { ModelKey } from './store.ts';
 import { catalog, ensureOfficePlugin, resolveSkills } from './skills.ts';
 import { decide, onApprovalChange, pendingApprovals } from './approvals.ts';
 import { onRuntimeEvent, send, stop } from './runtime.ts';
@@ -66,6 +70,7 @@ wss.on('connection', (ws) => {
   ws.send(
     JSON.stringify({
       type: 'snapshot',
+      teams: teams(),
       agents: agents(),
       chats: chats(),
       statuses: Object.fromEntries(statuses),
@@ -84,7 +89,7 @@ wss.on('connection', (ws) => {
     switch (m.type) {
       case 'chat': {
         const text = String(m.text ?? '').trim();
-        if (text && getAgent(m.agentId)) send(m.agentId, text, 'user').catch(() => {});
+        if (text && getAgent(m.agentId)) send(m.agentId, text, { kind: 'user' }).catch(() => {});
         break;
       }
       case 'decide':
@@ -97,6 +102,35 @@ wss.on('connection', (ws) => {
         const name = String(m.name ?? '').trim().slice(0, 40);
         const a = name && updateAgent(String(m.agentId), { name });
         if (a) broadcast({ type: 'agent', agent: a });
+        break;
+      }
+      case 'create_team': {
+        const col = Math.trunc(Number(m.col));
+        const row = Math.trunc(Number(m.row));
+        const name = String(m.name ?? '').trim().slice(0, 40);
+        const project = String(m.project ?? '').trim().slice(0, 48);
+        const orchestratorName = String(m.orchestratorName ?? '').trim().slice(0, 30);
+        const model = (String(m.model) in MODELS ? String(m.model) : 'fable') as ModelKey;
+        let error = '';
+        if (!name || !project || !orchestratorName) error = 'Fill in the team name, project and orchestrator name.';
+        else if (!Number.isFinite(col) || !Number.isFinite(row) || Math.abs(col) > 50 || Math.abs(row) > 50) error = 'That spot is off the map.';
+        else if (teamAt(col, row)) error = 'Another team already works on that spot.';
+        else if (teams().some((t) => t.name.toLowerCase() === name.toLowerCase())) error = `There's already a team called ${name}.`;
+        else if (findAgentByName(orchestratorName)) error = `Someone named ${orchestratorName} already works in the office.`;
+        if (error) {
+          ws.send(JSON.stringify({ type: 'team_error', error }));
+          break;
+        }
+        const { team, boss } = createTeam({ name, project, orchestratorName, model, col, row });
+        broadcast({ type: 'team', team });
+        broadcast({ type: 'agent', agent: boss });
+        ws.send(JSON.stringify({ type: 'team_created', teamId: team.id, orchestratorId: boss.id }));
+        break;
+      }
+      case 'rename_team': {
+        const name = String(m.name ?? '').trim().slice(0, 40);
+        const t = name && updateTeam(String(m.teamId), { name });
+        if (t) broadcast({ type: 'team', team: t });
         break;
       }
       case 'set_skills': {

@@ -1,8 +1,15 @@
 # Agent Office
 
-A local virtual office where AI agents work as characters at desks. You talk to the
-orchestrator (Maya, on Claude Fable); she hires teammates only with your approval and
-hands them tasks. Every agent is a Claude Code session running on your Max login.
+A local virtual office where AI agents work as characters at desks. The office is a map
+of teams. Each team has its own building, project and orchestrator. You talk to an
+orchestrator, who hires teammates only with your approval and hands them tasks.
+Teammates review each other's work and message each other, and you watch them walk
+over and talk in speech bubbles. Every agent is a Claude Code session running on your
+Max login.
+
+Drag or scroll to move around the map, and ctrl+scroll or the +/− buttons to zoom.
+Click an empty lot to build a new team, or click a team's sign to rename it. Open
+`/#demo` to watch a pretend conversation without using any usage.
 
 ## Run
 

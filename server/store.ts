@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
 
 export const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
-export const DATA_DIR = join(ROOT, 'data');
+export const DATA_DIR = process.env.AGENT_OFFICE_DATA ?? join(ROOT, 'data');
 export const PROJECTS_DIR = join(ROOT, '..', 'projects');
 export const HQ_DIR = join(DATA_DIR, 'hq');
 const STATE_FILE = join(DATA_DIR, 'state.json');
@@ -20,8 +20,19 @@ export const MODELS: Record<ModelKey, string> = {
 
 export type Status = 'idle' | 'thinking' | 'working' | 'waiting' | 'error';
 
+export type Team = {
+  id: string;
+  name: string;
+  project: string;
+  // Plot on the world map, in whole grid cells.
+  col: number;
+  row: number;
+  createdAt: number;
+};
+
 export type Agent = {
   id: string;
+  teamId: string;
   name: string;
   role: string;
   personality: string;
@@ -41,16 +52,19 @@ export type Agent = {
 export type ChatMsg = {
   id: string;
   agentId: string;
-  from: 'user' | 'agent' | 'tool' | 'system' | 'boss';
+  from: 'user' | 'agent' | 'tool' | 'system' | 'boss' | 'peer';
   text: string;
+  // For messages from a teammate: who sent it and whether they're waiting on an answer.
+  fromId?: string;
+  mode?: 'message' | 'ask';
   ts: number;
 };
 
-type State = { agents: Agent[]; chats: Record<string, ChatMsg[]> };
+type State = { teams: Team[]; agents: Agent[]; chats: Record<string, ChatMsg[]> };
 
 const MAX_CHAT = 300;
 
-let state: State = { agents: [], chats: {} };
+let state: State = { teams: [], agents: [], chats: {} };
 // Status is runtime-only: nothing is "working" after a restart.
 export const statuses = new Map<string, { status: Status; detail: string }>();
 
@@ -59,6 +73,8 @@ export function load() {
   mkdirSync(HQ_DIR, { recursive: true });
   mkdirSync(PROJECTS_DIR, { recursive: true });
   if (existsSync(STATE_FILE)) state = JSON.parse(readFileSync(STATE_FILE, 'utf8'));
+  state.teams ??= [];
+  migrateToTeams();
   for (const a of state.agents) {
     a.skills ??= [];
     if (a.busy) {
@@ -66,16 +82,62 @@ export function load() {
       addChat(a.id, 'system', `The app stopped while ${a.name} was working. Ask them to continue if the task isn't finished.`);
     }
   }
-  if (!state.agents.some((a) => a.isOrchestrator)) {
-    addAgent({
-      name: 'Maya',
-      role: 'Orchestrator',
-      personality: 'Warm, decisive and organised. Thinks before hiring and keeps the team small.',
-      model: 'fable',
-      project: null,
-      isOrchestrator: true,
-    });
+  if (!state.teams.length) {
+    createTeam({ name: "Maya's team", project: 'first-project', orchestratorName: 'Maya', model: 'fable', col: 0, row: 0 });
   }
+}
+
+// Offices from before teams existed become the first team, keeping everyone.
+function migrateToTeams() {
+  if (state.teams.length || !state.agents.length) return;
+  const counts = new Map<string, number>();
+  for (const a of state.agents) if (a.project) counts.set(a.project, (counts.get(a.project) ?? 0) + 1);
+  const project = [...counts.entries()].sort((x, y) => y[1] - x[1])[0]?.[0] ?? 'first-project';
+  const boss = state.agents.find((a) => a.isOrchestrator);
+  const team: Team = {
+    id: randomUUID(),
+    name: boss ? `${boss.name}'s team` : 'First team',
+    project,
+    col: 0,
+    row: 0,
+    createdAt: Date.now(),
+  };
+  state.teams.push(team);
+  for (const a of state.agents) a.teamId = team.id;
+  save();
+}
+
+const DEFAULT_ORCH_PERSONALITY = 'Warm, decisive and organised. Thinks before hiring and keeps the team small.';
+
+export function createTeam(t: { name: string; project: string; orchestratorName: string; model: ModelKey; col: number; row: number }) {
+  const team: Team = {
+    id: randomUUID(),
+    name: t.name,
+    project: slugify(t.project),
+    col: t.col,
+    row: t.row,
+    createdAt: Date.now(),
+  };
+  state.teams.push(team);
+  const boss = addAgent({
+    teamId: team.id,
+    name: t.orchestratorName,
+    role: 'Orchestrator',
+    personality: DEFAULT_ORCH_PERSONALITY,
+    model: t.model,
+    project: team.project,
+    isOrchestrator: true,
+  });
+  save();
+  return { team, boss };
+}
+
+export function updateTeam(id: string, patch: Partial<Pick<Team, 'name'>>) {
+  const t = state.teams.find((x) => x.id === id);
+  if (!t) return;
+  Object.assign(t, patch);
+  save();
+  return t;
 }
 
 let saveTimer: NodeJS.Timeout | null = null;
@@ -96,7 +158,11 @@ export const agents = () => state.agents;
 export const getAgent = (id: string) => state.agents.find((a) => a.id === id);
 export const findAgentByName = (name: string) =>
   state.agents.find((a) => a.name.toLowerCase() === name.trim().toLowerCase());
-export const orchestrator = () => state.agents.find((a) => a.isOrchestrator)!;
+export const teams = () => state.teams;
+export const getTeam = (id: string) => state.teams.find((t) => t.id === id);
+export const teamAt = (col: number, row: number) => state.teams.find((t) => t.col === col && t.row === row);
+export const teamMembers = (teamId: string) => state.agents.filter((a) => a.teamId === teamId);
+export const orchestratorOf = (teamId: string) => state.agents.find((a) => a.teamId === teamId && a.isOrchestrator)!;
 export const chats = () => state.chats;
 
 export function slugify(s: string) {
@@ -104,7 +170,7 @@ export function slugify(s: string) {
 }
 
 export function addAgent(
-  a: Pick<Agent, 'name' | 'role' | 'personality' | 'model' | 'project' | 'isOrchestrator'> & { skills?: string[] },
+  a: Pick<Agent, 'teamId' | 'name' | 'role' | 'personality' | 'model' | 'project' | 'isOrchestrator'> & { skills?: string[] },
 ) {
   const project = a.project ? slugify(a.project) : null;
   const cwd = project ? join(PROJECTS_DIR, project) : HQ_DIR;
@@ -141,8 +207,8 @@ export function removeAgent(id: string) {
   save();
 }
 
-export function addChat(agentId: string, from: ChatMsg['from'], text: string) {
-  const msg: ChatMsg = { id: randomUUID(), agentId, from, text, ts: Date.now() };
+export function addChat(agentId: string, from: ChatMsg['from'], text: string, extra?: Pick<ChatMsg, 'fromId' | 'mode'>) {
+  const msg: ChatMsg = { id: randomUUID(), agentId, from, text, ts: Date.now(), ...extra };
   const list = (state.chats[agentId] ??= []);
   list.push(msg);
   if (list.length > MAX_CHAT) list.splice(0, list.length - MAX_CHAT);
