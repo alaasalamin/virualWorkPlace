@@ -52,7 +52,7 @@ export type Agent = {
 export type ChatMsg = {
   id: string;
   agentId: string;
-  from: 'user' | 'agent' | 'tool' | 'system' | 'boss' | 'peer';
+  from: 'user' | 'agent' | 'tool' | 'system' | 'boss' | 'peer' | 'board';
   text: string;
   // For messages from a teammate: who sent it and whether they're waiting on an answer.
   fromId?: string;
@@ -60,11 +60,29 @@ export type ChatMsg = {
   ts: number;
 };
 
-type State = { teams: Team[]; agents: Agent[]; chats: Record<string, ChatMsg[]> };
+export type TaskStatus = 'todo' | 'doing' | 'review' | 'done' | 'blocked';
+
+export type Task = {
+  id: string;
+  teamId: string;
+  kind: 'task' | 'review';
+  title: string;
+  detail: string;
+  assigneeId: string;
+  createdBy: string; // agent id, or 'owner'
+  // Set on a teammate's part of a bigger card; the parent finishes when all its parts do.
+  parentId?: string;
+  status: TaskStatus;
+  result?: string;
+  createdAt: number;
+  updatedAt: number;
+};
+
+type State = { teams: Team[]; agents: Agent[]; chats: Record<string, ChatMsg[]>; tasks: Task[] };
 
 const MAX_CHAT = 300;
 
-let state: State = { teams: [], agents: [], chats: {} };
+let state: State = { teams: [], agents: [], chats: {}, tasks: [] };
 // Status is runtime-only: nothing is "working" after a restart.
 export const statuses = new Map<string, { status: Status; detail: string }>();
 
@@ -74,7 +92,15 @@ export function load() {
   mkdirSync(PROJECTS_DIR, { recursive: true });
   if (existsSync(STATE_FILE)) state = JSON.parse(readFileSync(STATE_FILE, 'utf8'));
   state.teams ??= [];
+  state.tasks ??= [];
   migrateToTeams();
+  // Tasks that were running when the app stopped can't finish now.
+  for (const t of state.tasks) {
+    if (t.status === 'doing' || t.status === 'review' || t.status === 'todo') {
+      t.status = 'blocked';
+      t.result = 'The app stopped before this finished.';
+    }
+  }
   for (const a of state.agents) {
     a.skills ??= [];
     if (a.busy) {
@@ -203,7 +229,42 @@ export function updateAgent(id: string, patch: Partial<Agent>) {
 
 export function removeAgent(id: string) {
   state.agents = state.agents.filter((a) => a.id !== id);
+  for (const t of state.tasks) if (t.assigneeId === id && t.status !== 'done') t.status = 'blocked';
   delete state.chats[id];
+  save();
+}
+
+// ---------- tasks ----------
+
+const DONE_KEPT_PER_TEAM = 100;
+
+export const tasks = () => state.tasks;
+export const tasksOf = (teamId: string) => state.tasks.filter((t) => t.teamId === teamId);
+
+export function addTask(t: Pick<Task, 'teamId' | 'kind' | 'title' | 'detail' | 'assigneeId' | 'createdBy'> & { parentId?: string }) {
+  const now = Date.now();
+  const task: Task = { ...t, id: randomUUID(), status: 'todo', createdAt: now, updatedAt: now };
+  state.tasks.push(task);
+  // Keep the board from growing forever: drop the oldest finished cards.
+  const done = state.tasks.filter((x) => x.teamId === t.teamId && x.status === 'done');
+  if (done.length > DONE_KEPT_PER_TEAM) {
+    const drop = new Set(done.slice(0, done.length - DONE_KEPT_PER_TEAM).map((x) => x.id));
+    state.tasks = state.tasks.filter((x) => !drop.has(x.id));
+  }
+  save();
+  return task;
+}
+
+export function updateTask(id: string, patch: Partial<Pick<Task, 'status' | 'result'>>) {
+  const t = state.tasks.find((x) => x.id === id);
+  if (!t) return;
+  Object.assign(t, patch, { updatedAt: Date.now() });
+  save();
+  return t;
+}
+
+export function removeTask(id: string) {
+  state.tasks = state.tasks.filter((t) => t.id !== id);
   save();
 }
 

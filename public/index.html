@@ -14,9 +14,15 @@
     <div class="world" id="world"></div>
   </main>
 
-  <header class="hud-title">
-    <h1>Agent Office</h1>
-    <p id="team-count"></p>
+  <header class="hud">
+    <div class="hud-title">
+      <h1>Agent Office</h1>
+      <p id="team-count"></p>
+    </div>
+    <div class="hud-actions">
+      <button class="btn waiting" id="waiting-btn" hidden></button>
+      <button class="btn no" id="alerts-btn" aria-pressed="false">Turn on alerts</button>
+    </div>
   </header>
 
   <nav class="map-tools" aria-label="Map">
@@ -59,6 +65,29 @@
     </form>
   </dialog>
 
+  <dialog class="board-dialog" id="board-dialog" aria-labelledby="board-title">
+    <header class="dialog-head">
+      <h2 id="board-title">Task board</h2>
+      <button class="icon-btn" id="board-close" aria-label="Close board">✕</button>
+    </header>
+    <div class="board-cols" id="board-cols"></div>
+  </dialog>
+
+  <dialog class="preview-dialog" id="preview-dialog" aria-labelledby="pv-title">
+    <header class="dialog-head">
+      <h2 id="pv-title">Preview</h2>
+      <form id="pv-form" class="pv-form">
+        <input id="pv-url" aria-label="Address" spellcheck="false">
+        <button class="btn no" type="submit">Go</button>
+        <button class="btn no" type="button" id="pv-reload">Reload</button>
+        <button class="link-btn" type="button" id="pv-reset">Back to project folder</button>
+        <a class="link-btn" id="pv-open" target="_blank" rel="noopener">Open in a tab</a>
+      </form>
+      <button class="icon-btn" id="pv-close" aria-label="Close preview">✕</button>
+    </header>
+    <iframe id="pv-frame" title="Site preview" sandbox="allow-scripts allow-forms allow-modals allow-popups"></iframe>
+  </dialog>
+
   <aside class="panel" id="panel" hidden aria-label="Chat">
     <header class="panel-head">
       <div class="panel-portrait" id="p-portrait"></div>
@@ -73,6 +102,11 @@
       <summary id="p-skills-sum">Skills</summary>
       <div class="skill-list" id="p-skill-list"></div>
     </details>
+    <div class="tabs" id="p-tabs" role="tablist" hidden>
+      <button role="tab" id="tab-chat" aria-selected="true">Chat</button>
+      <button role="tab" id="tab-work" aria-selected="false">Work</button>
+    </div>
+    <div class="work" id="work" hidden></div>
     <div class="log" id="log"></div>
     <form class="composer" id="composer">
       <textarea id="input" rows="2" placeholder="Message…" aria-label="Message"></textarea>

@@ -1,9 +1,14 @@
 import { stationSVG, portraitSVG } from './characters.js';
 import { initWorld, renderRooms, roomFor, focusTeam, refreshCamera } from './world.js';
+import { initBoard, openBoard, refreshBoard, renderWhiteboard } from './board.js';
+import { initAlerts, alertApproval, alertProblem, refreshAlerts } from './alerts.js';
+import { initPreview, openPreview, renderWork, setPreviewPort } from './work.js';
 import { initVisits, onPeer, onMessage as visitMessage, onDelta as visitDelta, onStatus as visitStatus } from './visits.js';
 
 const $ = (id) => document.getElementById(id);
 const teams = new Map();
+const tasks = new Map();
+let panelTab = 'chat';
 const agents = new Map();
 const statuses = {};
 const approvals = new Map();
@@ -44,8 +49,12 @@ function onEvent(e) {
       Object.assign(statuses, e.statuses);
       approvals.clear();
       for (const a of e.approvals) approvals.set(a.id, a);
+      tasks.clear();
+      for (const t of e.tasks ?? []) tasks.set(t.id, t);
+      if (e.previewPort) setPreviewPort(e.previewPort);
       renderOffice();
       renderMemos();
+      refreshAlerts();
       if (!cameraRestored) {
         cameraRestored = true;
         const first = [...teams.values()].sort((a, b) => a.createdAt - b.createdAt)[0];
@@ -69,6 +78,30 @@ function onEvent(e) {
       teams.set(e.team.id, e.team);
       renderOffice();
       if (selected) renderHead();
+      break;
+    case 'task': {
+      const before = tasks.get(e.task.id);
+      tasks.set(e.task.id, e.task);
+      const room = roomFor(e.task.teamId);
+      if (room) renderWhiteboard(room, e.task.teamId);
+      refreshBoard(e.task.teamId);
+      if (e.task.status === 'blocked' && before?.status !== 'blocked') {
+        alertProblem(`Agent Office: a task stopped`, `${agents.get(e.task.assigneeId)?.name ?? 'Someone'}: ${e.task.title}`);
+      }
+      break;
+    }
+    case 'task_removed': {
+      const t = tasks.get(e.taskId);
+      tasks.delete(e.taskId);
+      if (t) {
+        const room = roomFor(t.teamId);
+        if (room) renderWhiteboard(room, t.teamId);
+        refreshBoard(t.teamId);
+      }
+      break;
+    }
+    case 'change':
+      if (selected === e.agentId && panelTab === 'work') renderWork(agents.get(e.agentId), $('work'));
       break;
     case 'team_created':
       $('team-dialog').close();
@@ -116,10 +149,13 @@ function onEvent(e) {
     case 'approval':
       approvals.set(e.approval.id, e.approval);
       renderMemos();
+      refreshAlerts();
+      alertApproval(e.approval);
       break;
     case 'approval_resolved':
       approvals.delete(e.id);
       renderMemos();
+      refreshAlerts();
       break;
   }
 }
@@ -157,7 +193,8 @@ function makeStation(a) {
   el.dataset.id = a.id;
   el.dataset.name = a.name;
   el.innerHTML = `${stationSVG(a.name, a.isOrchestrator)}<span class="bubble"></span><span class="plaque"><b></b><small></small></span>`;
-  el.addEventListener('click', () => openChat(a.id));
+  // Clicking the laptop shows the files they've changed; anywhere else opens the chat.
+  el.addEventListener('click', (e) => openChat(a.id, e.target.closest('.laptop') && !a.isOrchestrator ? 'work' : 'chat'));
   el.addEventListener('pointerenter', () => showHover(a.id));
   el.addEventListener('pointerleave', hideHover);
   el.addEventListener('focus', () => showHover(a.id));
@@ -265,6 +302,7 @@ function renderOffice() {
     const boss = members.find((a) => a.isOrchestrator);
     if (boss && !front.querySelector(`[data-id="${boss.id}"]`)) front.appendChild(makeStation(boss));
     fitStage(room);
+    renderWhiteboard(room, t.id);
   }
   for (const a of agents.values()) updateStation(a.id);
   const people = agents.size;
@@ -350,6 +388,7 @@ function renderMemos() {
       const d = a.data;
       el.innerHTML = `
         <h3>${esc(a.title)}</h3>
+        ${teamLine(a)}
         <div class="hire">
           ${portraitSVG(d.name)}
           <div><b>${esc(d.name)}</b>${esc(d.role)}<br><span class="chip">${esc(MODEL_NAMES[d.model] ?? d.model)}</span> <span class="chip">${esc(d.project)}</span>${d.team ? ` <span class="chip">${esc(d.team)}</span>` : ''}</div>
@@ -364,6 +403,7 @@ function renderMemos() {
     } else if (a.kind === 'skills') {
       el.innerHTML = `
         <h3>${esc(a.title)}</h3>
+        ${teamLine(a)}
         ${skillChips(a.data.skills)}
         <p>${esc(a.detail)}</p>
         <input placeholder="Note for ${esc(agents.get(a.agentId)?.name ?? 'the orchestrator')} (optional)" aria-label="Note">
@@ -374,6 +414,7 @@ function renderMemos() {
     } else {
       el.innerHTML = `
         <h3>${esc(a.title)}</h3>
+        ${teamLine(a)}
         <pre>${esc(a.detail)}</pre>
         <input placeholder="Reason, if you deny (optional)" aria-label="Reason">
         <div class="actions">
@@ -385,12 +426,32 @@ function renderMemos() {
     el.addEventListener('click', (ev) => {
       const act = ev.target.closest('[data-act]')?.dataset.act;
       if (!act) return;
+      if (act === 'goto') return jumpTo(a);
       const note = el.querySelector('input').value.trim() || undefined;
       sendWS({ type: 'decide', id: a.id, approved: act !== 'no', always: act === 'always', note });
       for (const b of el.querySelectorAll('button')) b.disabled = true;
     });
     box.appendChild(el);
   }
+}
+
+const teamOfApproval = (a) => agents.get(a.agentId)?.teamId;
+
+function teamLine(a) {
+  const team = teams.get(teamOfApproval(a));
+  return team ? `<p class="memo-team">${esc(team.name)} <button class="link-btn" data-act="goto">Take me there</button></p>` : '';
+}
+
+// Fly to the team and make the person who's waiting wiggle.
+function jumpTo(a) {
+  const teamId = teamOfApproval(a);
+  if (!teamId) return;
+  focusTeam(teamId);
+  const el = document.querySelector(`.station[data-id="${a.agentId}"]`);
+  el?.classList.remove('ping');
+  void el?.offsetWidth;
+  el?.classList.add('ping');
+  document.querySelector(`.memo[data-id="${a.id}"]`)?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
 }
 
 function skillLabel(id) {
@@ -430,6 +491,8 @@ function msgEl(m) {
     const who = agents.get(m.fromId);
     const label = m.mode === 'ask' ? 'Question from' : 'Message from';
     el.innerHTML = `<span class="from">${label} ${esc(who?.name ?? 'a teammate')}</span>${md(m.text)}`;
+  } else if (m.from === 'board') {
+    el.innerHTML = `<span class="from">New task on the board</span>${md(m.text)}`;
   } else if (m.from === 'boss') {
     const boss = orchOf(agents.get(m.agentId)?.teamId);
     el.innerHTML = `<span class="from">Task from ${esc(boss?.name ?? 'the orchestrator')}</span>${md(m.text)}`;
@@ -515,18 +578,33 @@ $('p-skill-list').addEventListener('click', (e) => {
   sendWS({ type: 'set_skills', agentId: a.id, skills });
 });
 
+function setTab(tab) {
+  const a = agents.get(selected);
+  panelTab = a && !a.isOrchestrator ? tab : 'chat';
+  $('tab-chat').setAttribute('aria-selected', String(panelTab === 'chat'));
+  $('tab-work').setAttribute('aria-selected', String(panelTab === 'work'));
+  $('log').hidden = panelTab !== 'chat';
+  $('composer').hidden = panelTab !== 'chat';
+  $('work').hidden = panelTab !== 'work';
+  if (panelTab === 'work') renderWork(a, $('work'));
+}
+$('tab-chat').addEventListener('click', () => setTab('chat'));
+$('tab-work').addEventListener('click', () => setTab('work'));
+
 function renderComposer() {
   const s = statuses[selected]?.status ?? 'idle';
   $('p-stop').hidden = s === 'idle' || s === 'error';
 }
 
-function openChat(id) {
+function openChat(id, tab = 'chat') {
   selected = id;
   document.body.classList.add('chatting');
   $('panel').hidden = false;
   renderHead();
   renderSkills();
   renderComposer();
+  $('p-tabs').hidden = agents.get(id)?.isOrchestrator ?? true;
+  setTab(tab);
   const log = $('log');
   log.innerHTML = '';
   const list = chats[id] ?? [];
@@ -619,6 +697,24 @@ initVisits((id) => agents.get(id));
 let cameraRestored = initWorld({
   onLot: (col, row) => openTeamDialog({ kind: 'new', col, row }),
   onSign: (teamId) => openTeamDialog({ kind: 'rename', teamId }),
+  onBoard: (teamId) => openBoard(teamId),
+  onPreview: (teamId) => teams.get(teamId) && openPreview(teams.get(teamId)),
 });
+initBoard({
+  getTeam: (id) => teams.get(id),
+  getTasks: (teamId) => [...tasks.values()].filter((t) => t.teamId === teamId).sort((a, b) => a.createdAt - b.createdAt),
+  getAgent: (id) => agents.get(id),
+  onAction: (taskId, action) => sendWS({ type: 'task_action', taskId, action }),
+  onAdd: (teamId, title, detail) => sendWS({ type: 'add_task', teamId, title, detail }),
+  getOrchestrator: (teamId) => orchOf(teamId),
+  onCard: (agentId) => {
+    const a = agents.get(agentId);
+    if (!a) return;
+    focusTeam(a.teamId);
+    openChat(agentId);
+  },
+});
+initAlerts({ approvals: () => [...approvals.values()], teamOf: teamOfApproval, onJump: jumpTo });
+initPreview();
 refreshCamera();
 connect();

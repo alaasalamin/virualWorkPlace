@@ -19,7 +19,8 @@ const minimap = $('minimap');
 
 const cam = { x: ROOM_W / 2, y: ROOM_H / 2, z: 0.6 };
 let teams = [];
-let handlers = { onLot: () => {}, onSign: () => {}, onCamera: () => {} };
+let handlers = { onLot: () => {}, onSign: () => {}, onBoard: () => {}, onPreview: () => {}, onCamera: () => {} };
+let alertTeams = new Set();
 
 export const cellToWorld = (col, row) => ({ x: col * CELL_W, y: row * CELL_H });
 export const zoom = () => cam.z;
@@ -199,7 +200,14 @@ function makeRoom(team) {
       <button class="sign" title="Rename team"></button>
       <p class="project-tag"></p>
       <div class="window" aria-hidden="true"><span></span><span></span><span></span><span></span></div>
+      <button class="tv" title="Preview the team's site"><span class="tv-screen"><span>Preview</span></span></button>
       <div class="plant" aria-hidden="true">${PLANT}</div>
+      <button class="whiteboard" title="Open the task board">
+        <span class="wb-col" data-col="todo"><b>To do</b><i></i></span>
+        <span class="wb-col" data-col="doing"><b>Doing</b><i></i></span>
+        <span class="wb-col" data-col="review"><b>Review</b><i></i></span>
+        <span class="wb-col" data-col="done"><b>Done</b><i></i></span>
+      </button>
     </div>
     <div class="floor">
       <div class="stage">
@@ -208,6 +216,8 @@ function makeRoom(team) {
       </div>
     </div>`;
   el.querySelector('.sign').addEventListener('click', () => handlers.onSign(team.id));
+  el.querySelector('.whiteboard').addEventListener('click', () => handlers.onBoard(team.id));
+  el.querySelector('.tv').addEventListener('click', () => handlers.onPreview(team.id));
   world.appendChild(el);
   return el;
 }
@@ -313,6 +323,20 @@ export function drawMinimap() {
     ctx.fillText(label, ox + (p.x + ROOM_W / 2) * s, oy + (p.y + ROOM_H / 2) * s);
   }
 
+  // Teams with someone waiting for the owner pulse red.
+  const pulse = 5 + 2.5 * Math.sin(performance.now() / 220);
+  for (const t of teams) {
+    if (!alertTeams.has(t.id)) continue;
+    const p = cellToWorld(t.col, t.row);
+    ctx.beginPath();
+    ctx.arc(ox + (p.x + ROOM_W) * s - 2, oy + p.y * s + 2, pulse, 0, Math.PI * 2);
+    ctx.fillStyle = '#E5484D';
+    ctx.fill();
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = '#fff';
+    ctx.stroke();
+  }
+
   // What's on screen right now.
   const vw = viewport.clientWidth / cam.z;
   const vh = viewport.clientHeight / cam.z;
@@ -341,6 +365,17 @@ minimap.addEventListener('pointerdown', (e) => {
 });
 minimap.addEventListener('pointermove', (e) => mmDrag && minimapJump(e));
 minimap.addEventListener('pointerup', () => (mmDrag = false));
+
+let pulseLoop = null;
+export function setAlerts(teamIds) {
+  alertTeams = new Set(teamIds);
+  cancelAnimationFrame(pulseLoop);
+  const tick = () => {
+    drawMinimap();
+    if (alertTeams.size) pulseLoop = requestAnimationFrame(tick);
+  };
+  tick();
+}
 
 // ---------- setup ----------
 
