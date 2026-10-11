@@ -2,6 +2,7 @@ import { readFileSync, writeFileSync, existsSync, renameSync, statSync } from 'n
 import { join, relative, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { DATA_DIR } from './store.ts';
+import { realPath } from './paths.ts';
 
 // A file edit an agent made, kept so the owner can see the work as a diff.
 export type Change = {
@@ -61,8 +62,8 @@ export function recordEdit(
 ): Change[] {
   const raw = input.file_path ?? input.notebook_path;
   if (typeof raw !== 'string') return [];
-  const abs = resolve(agent.cwd, raw);
-  const rel = relative(agent.cwd, abs);
+  const abs = realPath(resolve(agent.cwd, raw));
+  const rel = relative(realPath(agent.cwd), abs);
   const path = rel.startsWith('..') ? abs : rel;
   const base = { agentId: agent.id, teamId: agent.teamId, toolUseId, path, tool, ts: Date.now() };
   const made: Change[] = [];

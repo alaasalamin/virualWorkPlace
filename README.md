@@ -16,7 +16,14 @@ Click a worker's laptop to see the files they changed as diffs, and the TV for a
 preview of the team's site. Previews are served on the next port (4546), sandboxed so
 pages agents write can't control the office. For projects with their own server, type
 its address in the preview bar. Turn on alerts for a chime and notifications when
-someone needs your OK. Open
+someone needs your OK.
+
+Each team has a safe (bottom-left of its office) for environment variables per
+environment (local, prod, …). It's encrypted with AES-256-GCM in `data/vaults/`, with
+the key in your macOS Keychain under "agent-office-vault". Team members can list keys,
+save values and write `.env` files straight from the safe; anything outside `local`,
+and reading a value into an agent's context, needs your OK. Safe values are replaced
+with `[secret env:KEY]` in chats, task cards and messages between agents. Open
 `/#demo` to watch a pretend conversation without using any usage.
 
 ## Run

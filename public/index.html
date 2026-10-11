@@ -23,6 +23,7 @@
       <button class="btn waiting" id="waiting-btn" hidden></button>
       <button class="btn no" id="alerts-btn" aria-pressed="false">Turn on alerts</button>
     </div>
+    <button class="usage-meter" id="usage-meter" hidden title="Your Claude plan usage. Click to refresh."></button>
   </header>
 
   <nav class="map-tools" aria-label="Map">
@@ -86,6 +87,42 @@
       <button class="icon-btn" id="pv-close" aria-label="Close preview">✕</button>
     </header>
     <iframe id="pv-frame" title="Site preview" sandbox="allow-scripts allow-forms allow-modals allow-popups"></iframe>
+  </dialog>
+
+  <dialog class="safe-dialog" id="safe-dialog" aria-labelledby="safe-title">
+    <header class="dialog-head">
+      <h2 id="safe-title">Safe</h2>
+      <span class="safe-lockline">Encrypted with your Mac's Keychain</span>
+      <button class="icon-btn" id="safe-close" aria-label="Close safe">✕</button>
+    </header>
+    <div class="safe-body">
+      <p class="form-error" id="safe-error" hidden></p>
+      <div id="safe-list-view">
+        <div class="safe-envs" id="safe-envs" role="tablist" aria-label="Environments"></div>
+        <p class="safe-note" id="safe-note"></p>
+        <table class="safe-table">
+          <thead><tr><th scope="col">Key</th><th scope="col">Value</th><th scope="col">Last changed</th><th scope="col"><span class="sr-only">Actions</span></th></tr></thead>
+          <tbody id="safe-rows"></tbody>
+        </table>
+        <form class="safe-add" id="safe-add">
+          <input name="key" placeholder="KEY_NAME" aria-label="Key" autocomplete="off" spellcheck="false" maxlength="100">
+          <input name="value" placeholder="value" aria-label="Value" autocomplete="off" spellcheck="false">
+          <button class="btn go" type="submit">Save</button>
+        </form>
+        <div class="safe-foot">
+          <button class="btn no" id="safe-edit-json">Edit as JSON</button>
+          <small>Stored in agent-office/data/vaults. Every value is shown in the JSON editor.</small>
+        </div>
+      </div>
+      <div id="safe-json-view" hidden>
+        <p class="safe-note">One object per environment, keys to text values: <code>{"local": {"KEY": "value"}, "prod": {}}</code></p>
+        <textarea id="safe-json" spellcheck="false" aria-label="Safe as JSON"></textarea>
+        <div class="safe-foot">
+          <button class="btn go" id="safe-json-save">Save JSON</button>
+          <button class="btn no" id="safe-json-cancel">Cancel</button>
+        </div>
+      </div>
+    </div>
   </dialog>
 
   <aside class="panel" id="panel" hidden aria-label="Chat">

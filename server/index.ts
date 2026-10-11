@@ -9,8 +9,10 @@ import {
 import type { ModelKey } from './store.ts';
 import { catalog, ensureOfficePlugin, resolveSkills } from './skills.ts';
 import { decide, onApprovalChange, pendingApprovals } from './approvals.ts';
-import { cardTitle, createTask, onRuntimeEvent, send, stop, triageTask } from './runtime.ts';
+import { cardTitle, createTask, onRuntimeEvent, scrubHistory, send, stop, triageTask } from './runtime.ts';
 import { changesFor, flushChanges, loadChanges } from './changes.ts';
+import { latestUsage, onUsage, refreshUsage, startUsagePolling, stopUsagePolling } from './usage.ts';
+import { checkName, checkVaultAccess, deleteKey, exportJson, importJson, listKeys, readValue, setValue } from './vault.ts';
 import { PROJECTS_DIR, getTeam, orchestratorOf, removeTask, tasks } from './store.ts';
 
 const HOST = '127.0.0.1';
@@ -28,6 +30,11 @@ const TYPES: Record<string, string> = {
 
 load();
 loadChanges();
+try {
+  checkVaultAccess();
+} catch (e) {
+  console.warn(`The team safes are unavailable: couldn't reach the macOS Keychain (${e instanceof Error ? e.message : e}).`);
+}
 ensureOfficePlugin();
 
 // Save everything before exiting so no conversation is lost.
@@ -75,9 +82,15 @@ function broadcast(event: unknown) {
 }
 
 onRuntimeEvent(broadcast);
+onUsage((usage) => broadcast({ type: 'usage', usage }));
 onApprovalChange(broadcast);
 
 wss.on('connection', (ws) => {
+  // Keep the usage meter fresh only while someone has the office open.
+  startUsagePolling();
+  ws.on('close', () => {
+    if (![...wss.clients].some((c) => c.readyState === WebSocket.OPEN)) stopUsagePolling();
+  });
   ws.send(
     JSON.stringify({
       type: 'snapshot',
@@ -87,6 +100,7 @@ wss.on('connection', (ws) => {
       statuses: Object.fromEntries(statuses),
       approvals: pendingApprovals(),
       tasks: tasks(),
+      usage: latestUsage(),
       previewPort: PREVIEW_PORT,
       skills: catalog().map(({ id, name, description, plugin }) => ({ id, name, description, plugin })),
     }),
@@ -152,6 +166,9 @@ wss.on('connection', (ws) => {
         if (t) broadcast({ type: 'team', team: t });
         break;
       }
+      case 'refresh_usage':
+        refreshUsage();
+        break;
       case 'add_task': {
         const team = getTeam(String(m.teamId));
         const title = String(m.title ?? '').trim().slice(0, 120);
@@ -161,6 +178,52 @@ wss.on('connection', (ws) => {
         // The orchestrator owns the card until they hand parts of it to teammates.
         const task = createTask({ teamId: team.id, kind: 'task', title, detail: detail || title, assigneeId: boss.id, createdBy: 'owner' });
         triageTask(task);
+        break;
+      }
+      // ---------- the team safes (owner only; values go to this tab, never broadcast) ----------
+      case 'vault_open':
+      case 'vault_reveal':
+      case 'vault_export':
+      case 'vault_save_json':
+      case 'vault_set':
+      case 'vault_delete': {
+        const teamId = String(m.teamId);
+        const reply = (o: object) => ws.send(JSON.stringify({ teamId, ...o }));
+        if (!getTeam(teamId)) break;
+        try {
+          const env = String(m.env ?? '');
+          const key = String(m.key ?? '');
+          if (m.type === 'vault_reveal') {
+            reply({ type: 'vault_value', env, key, value: readValue(teamId, env, key) ?? '' });
+            break;
+          }
+          if (m.type === 'vault_export') {
+            reply({ type: 'vault_json', json: JSON.stringify(exportJson(teamId), null, 2) });
+            break;
+          }
+          if (m.type === 'vault_save_json') {
+            let parsed: unknown;
+            try {
+              parsed = JSON.parse(String(m.json ?? ''));
+            } catch {
+              throw new Error("That isn't valid JSON. Check for missing quotes or commas.");
+            }
+            importJson(teamId, parsed, 'you');
+          } else if (m.type === 'vault_set') {
+            const err = checkName(env, key);
+            if (err) throw new Error(err);
+            setValue(teamId, env, key, String(m.value ?? ''), 'you');
+          } else if (m.type === 'vault_delete') {
+            deleteKey(teamId, env, key);
+          }
+          if (m.type !== 'vault_open') {
+            scrubHistory(teamId);
+            broadcast({ type: 'vault_changed', teamId });
+          }
+          reply({ type: 'vault', envs: listKeys(teamId) });
+        } catch (e) {
+          reply({ type: 'vault_error', error: e instanceof Error ? e.message : String(e) });
+        }
         break;
       }
       case 'task_action': {

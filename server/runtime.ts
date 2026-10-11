@@ -5,9 +5,14 @@ import { resolve, sep } from 'node:path';
 import {
   MODELS, PROJECTS_DIR, addAgent, addChat, findAgentByName, getAgent, getTeam, orchestratorOf, statuses, teamMembers, updateAgent,
 } from './store.ts';
-import { addTask, tasksOf, updateTask } from './store.ts';
+import { addTask, rewriteTeamText, tasks, tasksOf, updateTask } from './store.ts';
 import type { Agent, ChatMsg, ModelKey, Status, Task } from './store.ts';
 import { dropEdit, recordEdit } from './changes.ts';
+import { noteRateLimit } from './usage.ts';
+import { checkName, deleteKey, envFileText, exportJson, isSensitive, listKeys, readValue, setValue, vaultVersion } from './vault.ts';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { basename } from 'node:path';
+import { realPath } from './paths.ts';
 import { requestApproval } from './approvals.ts';
 import { catalog, resolveSkills } from './skills.ts';
 
@@ -18,12 +23,14 @@ export type ServerEvent =
   | { type: 'message'; msg: ChatMsg }
   | { type: 'peer'; fromId: string; toId: string; mode: 'message' | 'ask' | 'assign'; text: string }
   | { type: 'task'; task: Task }
-  | { type: 'change'; agentId: string };
+  | { type: 'change'; agentId: string }
+  | { type: 'vault_changed'; teamId: string };
 
 // Who a turn's message came from. Teammate messages carry a hop count so chains can't loop forever.
 export type Origin =
   | { kind: 'user' }
   | { kind: 'board'; taskId: string }
+  | { kind: 'report'; fromId: string; taskId: string }
   | { kind: 'boss' }
   | { kind: 'peer'; fromId: string; depth: number; mode: 'message' | 'ask' };
 
@@ -41,7 +48,42 @@ function setStatus(agentId: string, status: Status, detail = '') {
 }
 
 function chat(agentId: string, from: ChatMsg['from'], text: string, extra?: Pick<ChatMsg, 'fromId' | 'mode'>) {
-  broadcast({ type: 'message', msg: addChat(agentId, from, text, extra) });
+  const teamId = getAgent(agentId)?.teamId;
+  broadcast({ type: 'message', msg: addChat(agentId, from, teamId ? redact(teamId, text) : text, extra) });
+}
+
+// ---------- keeping secrets out of logs ----------
+
+// Values shorter than this are too likely to be ordinary words ("true", "3306").
+const MIN_SECRET = 8;
+const secretCache = new Map<string, { version: number; pairs: [string, string][] }>();
+
+function secretsOf(teamId: string) {
+  const hit = secretCache.get(teamId);
+  if (hit && hit.version === vaultVersion()) return hit.pairs;
+  let pairs: [string, string][] = [];
+  try {
+    for (const [env, keys] of Object.entries(exportJson(teamId))) {
+      for (const [key, value] of Object.entries(keys)) if (value.length >= MIN_SECRET) pairs.push([value, `${env}:${key}`]);
+    }
+  } catch {
+    pairs = []; // safe unreadable; nothing to hide
+  }
+  pairs.sort((a, b) => b[0].length - a[0].length);
+  secretCache.set(teamId, { version: vaultVersion(), pairs });
+  return pairs;
+}
+
+// After the safe changes, scrub its values from what's already stored for the team.
+export function scrubHistory(teamId: string) {
+  return rewriteTeamText(teamId, (t) => redact(teamId, t));
+}
+
+// Replace any value from the team's safe with a label, so it isn't stored or passed on.
+export function redact(teamId: string, text: string) {
+  let out = text;
+  for (const [value, label] of secretsOf(teamId)) if (out.includes(value)) out = out.split(value).join(`[secret ${label}]`);
+  return out;
 }
 
 // ---------- permissions ----------
@@ -51,8 +93,9 @@ const EDIT_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit']);
 
 function inside(path: unknown, dir: string) {
   if (typeof path !== 'string') return false;
-  const p = resolve(dir, path);
-  return p === dir || p.startsWith(dir + sep);
+  const p = realPath(resolve(dir, path));
+  const d = realPath(dir);
+  return p === d || p.startsWith(d + sep);
 }
 
 function summarize(toolName: string, input: Record<string, unknown>) {
@@ -107,6 +150,12 @@ Working with teammates:
 - When feedback arrives, apply what makes sense. If you disagree, say why. Tell the reviewer when it's ready for a re-check only if the change was significant.
 - Don't send thanks, greetings or acknowledgements. Every message should move the work forward.
 
+Secrets and environment variables:
+- Your team has a safe with environment variables per environment (local, prod, …). Check it with vault_list.
+- To give your code its variables, use vault_write_env to write a .env file; the values never pass through you. Make sure that file is in .gitignore.
+- When you create or receive credentials or config, store them with vault_set instead of writing them into code, files you commit, chat or messages.
+- Use vault_read only when there's no other way, and never repeat a secret value anywhere.
+
 Speak like a friendly colleague, in first person. Keep chat replies short. When you finish a task, end with a brief summary of what you did and anything that still needs attention.`;
 }
 
@@ -123,7 +172,10 @@ How you work:
 - Teammates can have skills: packaged expertise such as frontend design. Use list_skills to see what's available, give fitting skills when you hire (skills field), and use request_skills to add skills to someone already on the team. The owner approves both.
 - Teammates can message each other directly, for example to request a design review or send feedback. You'll see it in their chats. You may also receive messages from them.
 - The owner can add tasks to your team's board. You'll get each one as a message with its task id. Pick who delivers it and pass the task_id to assign_task so the card moves on the board.
-- Use assign_task to hand a teammate a concrete, self-contained task. They don't see this conversation, so include all context they need. You get their report back when they finish.
+- Your team has a safe for environment variables (vault_list shows the keys). Never put secret values in task descriptions; tell teammates which keys to use from the safe.
+- Use assign_task to hand a teammate a concrete, self-contained task. They don't see this conversation, so include all context they need. It returns immediately, and their report arrives later as a message, so keep the team working in parallel: hand out independent tasks to different people at the same time.
+- Before assigning, check list_team. Prefer a teammate who is free and whose role and skills fit. If the best fit is busy, give it to another free teammate who can do it well; queue it behind the busy one only when nobody else fits, or propose a hire if the team is stretched.
+- When work depends on other work (build, then review), assign the next step when the report for the first arrives.
 - Don't hire more people than the work needs. Reuse existing teammates when they fit.
 - You can read files in the projects folder (${PROJECTS_DIR}) to check work, but you don't edit files yourself.
 Keep replies to the owner short and conversational. Tell them what you're doing and what came back.`;
@@ -138,12 +190,14 @@ export function cardTitle(title: string | undefined, text: string) {
 }
 
 export function createTask(t: Parameters<typeof addTask>[0]) {
-  const task = addTask(t);
+  const task = addTask({ ...t, title: redact(t.teamId, t.title), detail: redact(t.teamId, t.detail) });
   broadcast({ type: 'task', task });
   return task;
 }
 
 function moveTask(id: string, patch: Parameters<typeof updateTask>[1]) {
+  const teamId = tasks().find((t) => t.id === id)?.teamId;
+  if (teamId && patch.result) patch = { ...patch, result: redact(teamId, patch.result) };
   const task = updateTask(id, patch);
   if (task) broadcast({ type: 'task', task });
 }
@@ -208,6 +262,9 @@ function officeServer(boss: Agent) {
     tools: [
       tool('list_team', 'List everyone on your team with their role, project, skills and current status.', {}, async () => ({
         content: [{ type: 'text', text: teamLines(boss.id, teamId) }],
+      })),
+      tool('vault_list', "List the keys in your team's safe (names only). Teammates read and write it themselves.", {}, async () => ({
+        content: [{ type: 'text', text: safeListText(teamId) }],
       })),
       tool('list_tasks', "See your team's task board: what's to do, in progress, in review and recently done.", {}, async () => ({
         content: [{ type: 'text', text: boardText(teamId) }],
@@ -299,14 +356,18 @@ function officeServer(boss: Agent) {
       ),
       tool(
         'assign_task',
-        'Give a teammate a task and wait for their report. Include all context; they cannot see your conversation.',
+        "Give a teammate a task. Returns right away so you can hand out more work; their report arrives later as a message. If they're busy, the task waits in their queue. Include all context; they can't see your conversation.",
         {
           agent_name: z.string(),
+          wait: z
+            .boolean()
+            .optional()
+            .describe('Wait here for their report instead. Only for quick answers you need before you can continue.'),
           title: z.string().optional().describe('Short card title for the task board, under 60 characters'),
           task_id: z.string().optional().describe("The board task's id, when this assignment delivers (part of) a task from the board"),
           task: z.string(),
         },
-        async ({ agent_name, title, task_id, task }) => {
+        async ({ agent_name, title, task_id, task, wait }) => {
           const a = member(agent_name);
           if (!a) {
             return { content: [{ type: 'text', text: `No one named ${agent_name} on your team. Use list_team.` }], isError: true };
@@ -318,12 +379,30 @@ function officeServer(boss: Agent) {
             parentId = parent.id;
             if (parent.status !== 'doing') moveTask(parent.id, { status: 'doing', result: '' });
           }
-          broadcast({ type: 'peer', fromId: boss.id, toId: a.id, mode: 'assign', text: task });
+          broadcast({ type: 'peer', fromId: boss.id, toId: a.id, mode: 'assign', text: redact(teamId, task) });
           const card = createTask({
             teamId, kind: 'task', title: cardTitle(title, task), detail: task, assigneeId: a.id, createdBy: boss.id, parentId,
           });
-          const report = await send(a.id, task, { kind: 'boss' }, card);
-          return { content: [{ type: 'text', text: `${a.name}'s report:\n${report || '(no text reply)'}` }] };
+          const ahead = queuedFor(a.id);
+          const run = send(a.id, task, { kind: 'boss' }, card);
+          if (wait) {
+            const report = await run;
+            return { content: [{ type: 'text', text: `${a.name}'s report:\n${report || '(no text reply)'}` }] };
+          }
+          // Hand the report back to the orchestrator as its own message once the work is done.
+          run
+            .then((report) => {
+              const final = tasksOf(teamId).find((t) => t.id === card.id);
+              const outcome = final?.status === 'blocked' ? `stopped (${final.result ?? 'no reason given'})` : 'finished';
+              const parent = parentId ? tasksOf(teamId).find((t) => t.id === parentId) : undefined;
+              const header = `${a.name} ${outcome} "${card.title}"${parent ? `, part of board task "${parent.title}" (id ${parent.id})` : ''}.`;
+              send(boss.id, `${header}\n\n${report || '(no text reply)'}`, { kind: 'report', fromId: a.id, taskId: card.id }).catch(() => {});
+            })
+            .catch(() => {});
+          const where = ahead
+            ? `${a.name} is busy, so this waits in their queue behind ${ahead} other ${ahead === 1 ? 'task' : 'tasks'}.`
+            : `${a.name} has started.`;
+          return { content: [{ type: 'text', text: `${where} Their report will arrive as a message. Hand out other work in the meantime.` }] };
         },
       ),
     ],
@@ -333,12 +412,126 @@ function officeServer(boss: Agent) {
 function teamLines(selfId: string, teamId: string) {
   return teamMembers(teamId)
     .map((a) => {
-      const s = statuses.get(a.id)?.status ?? 'idle';
       const sk = a.skills.length ? a.skills.join(', ') : 'none';
       const where = a.isOrchestrator ? 'orchestrator' : `project ${a.project ?? '-'}`;
-      return `- ${a.name}${a.id === selfId ? ' (you)' : ''}: ${a.role} | ${where} | skills ${sk} | ${s}`;
+      const n = pendingTurns.get(a.id) ?? 0;
+      const availability = n === 0 ? 'free' : n === 1 ? 'busy' : `busy, ${n - 1} more queued`;
+      return `- ${a.name}${a.id === selfId ? ' (you)' : ''}: ${a.role} | ${where} | skills ${sk} | ${availability}`;
     })
     .join('\n');
+}
+
+// ---------- the team's safe ----------
+
+function safeListText(teamId: string) {
+  const envs = listKeys(teamId);
+  return Object.entries(envs)
+    .map(([env, keys]) => `${env}: ${keys.length ? keys.map((k) => k.key).join(', ') : '(empty)'}`)
+    .join('\n');
+}
+
+// Ask the owner, unless they said "always" for this agent and action before.
+async function ownerOK(agent: Agent, always: string, label: string, title: string, detail: string) {
+  const fresh = getAgent(agent.id) ?? agent;
+  if (fresh.alwaysAllow.includes(always)) return { ok: true };
+  const prev = statuses.get(agent.id);
+  setStatus(agent.id, 'waiting', 'needs your OK for the safe');
+  const d = await requestApproval({ kind: 'vault', agentId: agent.id, toolName: label, title, detail });
+  setStatus(agent.id, prev?.status === 'waiting' ? 'working' : prev?.status ?? 'working', prev?.detail ?? '');
+  if (d.approved && d.always) updateAgent(agent.id, { alwaysAllow: [...fresh.alwaysAllow, always] });
+  return { ok: d.approved, note: d.note };
+}
+
+function safeTools(self: Agent) {
+  const text = (t: string, isError = false) => ({ content: [{ type: 'text' as const, text: t }], isError });
+  const changed = () => {
+    scrubHistory(self.teamId);
+    broadcast({ type: 'vault_changed', teamId: self.teamId });
+  };
+  const env = z.string().describe('Environment, e.g. "local" or "prod"');
+  return [
+    tool('vault_list', "List the keys in your team's safe for each environment (names only, no values).", {}, async () =>
+      text(safeListText(self.teamId)),
+    ),
+    tool(
+      'vault_set',
+      "Save or update an environment variable in the team's safe. Use it for credentials and config you create or receive, instead of writing them into files or messages. Non-local environments need the owner's OK.",
+      { env, key: z.string().describe('Like STRIPE_SECRET_KEY'), value: z.string() },
+      async ({ env, key, value }) => {
+        const err = checkName(env, key);
+        if (err) return text(err, true);
+        if (isSensitive(env)) {
+          const ok = await ownerOK(
+            self, `vault_set:${env}`, `${env} safe changes`,
+            `${self.name} wants to ${readValue(self.teamId, env, key) === undefined ? 'add' : 'change'} ${key} in the ${env} safe`,
+            `The new value is ${value.length} characters long (hidden here).`,
+          );
+          if (!ok.ok) return text(`The owner said no.${ok.note ? ` Their note: ${ok.note}` : ''}`);
+        }
+        try {
+          setValue(self.teamId, env, key, value, self.name);
+        } catch (e) {
+          return text(e instanceof Error ? e.message : String(e), true);
+        }
+        changed();
+        return text(`Saved ${key} in the ${env} safe.`);
+      },
+    ),
+    tool(
+      'vault_write_env',
+      "Write an environment's variables from the safe into a .env file in your project. The values go straight to the file without passing through you, so prefer this over vault_read. Non-local environments need the owner's OK.",
+      { env, path: z.string().optional().describe('File path inside your project, default ".env"') },
+      async ({ env, path }) => {
+        const err = checkName(env);
+        if (err) return text(err, true);
+        const target = resolve(self.cwd, path || '.env');
+        if (!inside(target, self.cwd)) return text('The file has to be inside your project folder.', true);
+        const { text: body, count } = envFileText(self.teamId, env);
+        if (!count) return text(`The ${env} safe is empty.`, true);
+        if (isSensitive(env)) {
+          const ok = await ownerOK(
+            self, `vault_env:${env}`, `${env} env files`,
+            `${self.name} wants to write the ${env} secrets to a file`,
+            `${count} variables into ${target}`,
+          );
+          if (!ok.ok) return text(`The owner said no.${ok.note ? ` Their note: ${ok.note}` : ''}`);
+        }
+        writeFileSync(target, body, { mode: 0o600 });
+        const ignore = resolve(self.cwd, '.gitignore');
+        const ignored = existsSync(ignore) && readFileSync(ignore, 'utf8').split('\n').some((l) => l.trim() === basename(target) || l.trim() === '.env*' || l.trim() === '*.env');
+        return text(
+          `Wrote ${count} variables to ${target}.${ignored ? '' : ` It isn't in .gitignore yet: add "${basename(target)}" there so the secrets are never committed.`}`,
+        );
+      },
+    ),
+    tool(
+      'vault_read',
+      "Read one value from the safe into this conversation. Needs the owner's OK. Only use it when you can't use vault_write_env, and never repeat the value in chat, messages or committed files.",
+      { env, key: z.string() },
+      async ({ env, key }) => {
+        const value = readValue(self.teamId, env, key);
+        if (value === undefined) return text(`There's no ${key} in the ${env} safe. Use vault_list.`, true);
+        const ok = await ownerOK(self, `vault_read:${env}`, `${env} safe reads`, `${self.name} wants to read ${key} from the ${env} safe`, 'The value will be shown to the agent.');
+        if (!ok.ok) return text(`The owner said no.${ok.note ? ` Their note: ${ok.note}` : ''}`);
+        return text(value);
+      },
+    ),
+    tool(
+      'vault_delete',
+      "Remove a key from the team's safe. Non-local environments need the owner's OK.",
+      { env, key: z.string() },
+      async ({ env, key }) => {
+        if (readValue(self.teamId, env, key) === undefined) return text(`There's no ${key} in the ${env} safe.`, true);
+        if (isSensitive(env)) {
+          const ok = await ownerOK(self, `vault_delete:${env}`, `${env} safe deletions`, `${self.name} wants to delete ${key} from the ${env} safe`, '');
+          if (!ok.ok) return text(`The owner said no.${ok.note ? ` Their note: ${ok.note}` : ''}`);
+        }
+        deleteKey(self.teamId, env, key);
+        changed();
+        return text(`Removed ${key} from the ${env} safe.`);
+      },
+    ),
+  ];
 }
 
 // ---------- teammate messaging (workers) ----------
@@ -367,6 +560,7 @@ function teamServer(self: Agent, depth: number) {
     version: '1.0.0',
     alwaysLoad: true,
     tools: [
+      ...safeTools(self),
       tool('list_team', 'See who works in the office: roles, projects, skills and whether they are busy.', {}, async () =>
         text(teamLines(self.id, self.teamId)),
       ),
@@ -385,7 +579,7 @@ function teamServer(self: Agent, depth: number) {
         async ({ name, kind, title, message }) => {
           const to = checkPeer(self, name, depth);
           if (typeof to === 'string') return text(to, true);
-          broadcast({ type: 'peer', fromId: self.id, toId: to.id, mode: 'message', text: message });
+          broadcast({ type: 'peer', fromId: self.id, toId: to.id, mode: 'message', text: redact(self.teamId, message) });
           const card =
             kind === 'review_request'
               ? createTask({
@@ -406,11 +600,11 @@ function teamServer(self: Agent, depth: number) {
           if (typeof to === 'string') return text(to, true);
           if (isBusy(to.id)) {
             // Waiting on a busy teammate could deadlock, so leave the question in their queue instead.
-            broadcast({ type: 'peer', fromId: self.id, toId: to.id, mode: 'message', text: question });
+            broadcast({ type: 'peer', fromId: self.id, toId: to.id, mode: 'message', text: redact(self.teamId, question) });
             send(to.id, question, { kind: 'peer', fromId: self.id, depth: depth + 1, mode: 'message' }).catch(() => {});
             return text(`${to.name} is busy, so your question was left as a message. Continue without the answer if you can.`);
           }
-          broadcast({ type: 'peer', fromId: self.id, toId: to.id, mode: 'ask', text: question });
+          broadcast({ type: 'peer', fromId: self.id, toId: to.id, mode: 'ask', text: redact(self.teamId, question) });
           const answer = await send(to.id, question, { kind: 'peer', fromId: self.id, depth: depth + 1, mode: 'ask' });
           return text(`${to.name} answered:\n${answer || '(no answer)'}`);
         },
@@ -425,7 +619,14 @@ function promptFor(text: string, origin: Origin) {
 
 ${text}
 
-Decide who should deliver it, then call assign_task with task_id "${origin.taskId}" for each teammate who works on it. If several people are needed, give each a self-contained part. If nobody on the team fits, propose a hire first. If the task is unclear or can't be done, say what you need from the owner instead of guessing. Finish with a short note on who did what.`;
+Check list_team for who is free and fits, then call assign_task with task_id "${origin.taskId}" for each teammate who works on it. Others may already be busy with earlier tasks; work in parallel where you can. If several people are needed, give each a self-contained part. If nobody on the team fits, propose a hire first. If the task is unclear or can't be done, say what you need from the owner instead of guessing. Finish with a short note on who you gave it to.`;
+  }
+  if (origin.kind === 'report') {
+    return `A report from your team:
+
+${text}
+
+If this needs a follow-up (a review, the next step, a fix), assign it now. If it completes what the owner asked for, tell them in a sentence or two. Otherwise reply in one short line.`;
   }
   if (origin.kind !== 'peer') return text;
   const s = getAgent(origin.fromId);
@@ -444,12 +645,17 @@ const pendingTurns = new Map<string, number>();
 
 // True while the agent has a turn running or waiting in its queue.
 export const isBusy = (agentId: string) => (pendingTurns.get(agentId) ?? 0) > 0;
+// Turns already running or waiting for this agent.
+const queuedFor = (agentId: string) => pendingTurns.get(agentId) ?? 0;
 
 // How the agent's last turn ended, so its task card can be marked done or stopped.
 const lastOutcome = new Map<string, { ok: boolean; reason?: string }>();
 
 // Messages to one agent run one at a time, in order. A task card, if any, follows the turn.
 export function send(agentId: string, text: string, origin: Origin, card?: Task): Promise<string> {
+  // Agents pass work to each other as text; keep safe values out of it. The owner's own words go through as typed.
+  const target = getAgent(agentId);
+  if (target && origin.kind !== 'user') text = redact(target.teamId, text);
   pendingTurns.set(agentId, (pendingTurns.get(agentId) ?? 0) + 1);
   const prev = queues.get(agentId) ?? Promise.resolve();
   const next = prev
@@ -463,6 +669,8 @@ export function send(agentId: string, text: string, origin: Origin, card?: Task)
         const out = lastOutcome.get(agentId);
         const summary = reply.trim().split('\n').slice(-6).join('\n').slice(-400);
         moveTask(card.id, out?.ok === false ? { status: 'blocked', result: out.reason } : { status: 'done', result: summary });
+        const boss = card.parentId ? orchestratorOf(card.teamId) : undefined;
+        if (boss && !controllers.has(boss.id)) settleParents(card.teamId);
       }
       return reply;
     })
@@ -490,6 +698,7 @@ async function runTurn(agentId: string, text: string, origin: Origin, retried = 
   if (!retried) {
     if (origin.kind === 'peer') chat(agentId, 'peer', text, { fromId: origin.fromId, mode: origin.mode });
     else if (origin.kind === 'board') chat(agentId, 'board', text);
+    else if (origin.kind === 'report') chat(agentId, 'report', text, { fromId: origin.fromId });
     else chat(agentId, origin.kind, text);
   }
   const depth = origin.kind === 'peer' ? origin.depth : 0;
@@ -515,7 +724,7 @@ async function runTurn(agentId: string, text: string, origin: Origin, retried = 
     options.tools = ['Read', 'Glob', 'Grep'];
     options.additionalDirectories = [PROJECTS_DIR];
     options.mcpServers = { office: officeServer(agent) };
-    options.allowedTools = ['list_team', 'list_tasks', 'list_skills', 'propose_agent', 'request_skills', 'assign_task'].map(
+    options.allowedTools = ['list_team', 'list_tasks', 'vault_list', 'list_skills', 'propose_agent', 'request_skills', 'assign_task'].map(
       (t) => `mcp__office__${t}`,
     );
     options.skills = [];
@@ -523,7 +732,9 @@ async function runTurn(agentId: string, text: string, origin: Origin, retried = 
     options.systemPrompt = { type: 'preset', preset: 'claude_code', append: workerPrompt(agent) };
     options.additionalDirectories = [PROJECTS_DIR];
     options.mcpServers = { team: teamServer(agent, depth) };
-    options.allowedTools = ['list_team', 'message_teammate', 'ask_teammate'].map((t) => `mcp__team__${t}`);
+    options.allowedTools = [
+      'list_team', 'message_teammate', 'ask_teammate', 'vault_list', 'vault_set', 'vault_write_env', 'vault_read', 'vault_delete',
+    ].map((t) => `mcp__team__${t}`);
     // Load only the plugins that hold this agent's skills, and enable only those skills.
     const mine = catalog().filter((s) => agent.skills.includes(s.id));
     options.plugins = [...new Set(mine.map((s) => s.pluginPath))].map((path) => ({ type: 'local' as const, path }));
@@ -575,7 +786,7 @@ function handle(agent: Agent, m: SDKMessage, texts: string[]) {
         else if (e.content_block.type === 'thinking') setStatus(agent.id, 'thinking');
         else if (e.content_block.type === 'text') setStatus(agent.id, 'working', 'typing');
       } else if (e.type === 'content_block_delta' && e.delta.type === 'text_delta') {
-        broadcast({ type: 'delta', agentId: agent.id, text: e.delta.text });
+        broadcast({ type: 'delta', agentId: agent.id, text: redact(agent.teamId, e.delta.text) });
       }
       break;
     }
@@ -596,11 +807,20 @@ function handle(agent: Agent, m: SDKMessage, texts: string[]) {
           if (name === 'list_team') line = 'checks the team';
           if (name === 'message_teammate') line = `→ ${input.name}: ${String(input.message).slice(0, 300)}`;
           if (name === 'ask_teammate') line = `asks ${input.name}: ${String(input.question).slice(0, 300)}`;
+          // Never put secret values in the chat log.
+          if (name === 'vault_list') line = 'checks the safe';
+          if (name === 'vault_set') line = `saves ${input.key} in the ${input.env} safe`;
+          if (name === 'vault_read') line = `asks to read ${input.key} from the ${input.env} safe`;
+          if (name === 'vault_write_env') line = `writes the ${input.env} safe to ${input.path || '.env'}`;
+          if (name === 'vault_delete') line = `removes ${input.key} from the ${input.env} safe`;
           chat(agent.id, 'tool', line);
         }
       }
       break;
     }
+    case 'rate_limit_event':
+      noteRateLimit(m.rate_limit_info);
+      break;
     case 'user': {
       // A denied or failed edit never happened; take it off the change list.
       const content = m.message.content;

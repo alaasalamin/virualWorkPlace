@@ -52,7 +52,7 @@ export type Agent = {
 export type ChatMsg = {
   id: string;
   agentId: string;
-  from: 'user' | 'agent' | 'tool' | 'system' | 'boss' | 'peer' | 'board';
+  from: 'user' | 'agent' | 'tool' | 'system' | 'boss' | 'peer' | 'board' | 'report';
   text: string;
   // For messages from a teammate: who sent it and whether they're waiting on an answer.
   fromId?: string;
@@ -266,6 +266,25 @@ export function updateTask(id: string, patch: Partial<Pick<Task, 'status' | 'res
 export function removeTask(id: string) {
   state.tasks = state.tasks.filter((t) => t.id !== id);
   save();
+}
+
+// Rewrite every stored text of a team (chats and task cards), e.g. to scrub a secret.
+export function rewriteTeamText(teamId: string, fn: (text: string) => string) {
+  let changed = false;
+  for (const a of state.agents.filter((x) => x.teamId === teamId)) {
+    for (const m of state.chats[a.id] ?? []) {
+      const next = fn(m.text);
+      if (next !== m.text) (m.text = next), (changed = true);
+    }
+  }
+  for (const t of state.tasks.filter((x) => x.teamId === teamId)) {
+    for (const f of ['title', 'detail', 'result'] as const) {
+      const v = t[f];
+      if (typeof v === 'string' && fn(v) !== v) (t[f] = fn(v)), (changed = true);
+    }
+  }
+  if (changed) save();
+  return changed;
 }
 
 export function addChat(agentId: string, from: ChatMsg['from'], text: string, extra?: Pick<ChatMsg, 'fromId' | 'mode'>) {

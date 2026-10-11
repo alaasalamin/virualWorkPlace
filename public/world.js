@@ -19,7 +19,7 @@ const minimap = $('minimap');
 
 const cam = { x: ROOM_W / 2, y: ROOM_H / 2, z: 0.6 };
 let teams = [];
-let handlers = { onLot: () => {}, onSign: () => {}, onBoard: () => {}, onPreview: () => {}, onCamera: () => {} };
+let handlers = { onLot: () => {}, onSign: () => {}, onBoard: () => {}, onPreview: () => {}, onSafe: () => {}, onCamera: () => {} };
 let alertTeams = new Set();
 
 export const cellToWorld = (col, row) => ({ x: col * CELL_W, y: row * CELL_H });
@@ -210,6 +210,17 @@ function makeRoom(team) {
       </button>
     </div>
     <div class="floor">
+      <button class="safe" title="Open the team's safe" aria-label="Open the team's safe">
+        <svg viewBox="0 0 120 120" aria-hidden="true">
+          <rect x="8" y="10" width="104" height="96" rx="12" fill="#5A6B82" stroke="#1E2A3A" stroke-width="5"/>
+          <rect x="20" y="22" width="80" height="72" rx="8" fill="#76879E" stroke="#1E2A3A" stroke-width="4"/>
+          <circle cx="60" cy="58" r="20" fill="#C9D3DE" stroke="#1E2A3A" stroke-width="4"/>
+          <g class="dial"><circle cx="60" cy="58" r="7" fill="#1E2A3A"/><path d="M60 42 L60 50" stroke="#1E2A3A" stroke-width="4" stroke-linecap="round"/></g>
+          <rect x="92" y="44" width="8" height="28" rx="3" fill="#FFD23F" stroke="#1E2A3A" stroke-width="3"/>
+          <rect x="18" y="104" width="16" height="10" rx="3" fill="#1E2A3A"/><rect x="86" y="104" width="16" height="10" rx="3" fill="#1E2A3A"/>
+        </svg>
+        <span>Safe</span>
+      </button>
       <div class="stage">
         <div class="team"></div>
         <div class="front"></div>
@@ -218,6 +229,7 @@ function makeRoom(team) {
   el.querySelector('.sign').addEventListener('click', () => handlers.onSign(team.id));
   el.querySelector('.whiteboard').addEventListener('click', () => handlers.onBoard(team.id));
   el.querySelector('.tv').addEventListener('click', () => handlers.onPreview(team.id));
+  el.querySelector('.safe').addEventListener('click', () => handlers.onSafe(team.id));
   world.appendChild(el);
   return el;
 }

@@ -3,6 +3,7 @@ import { initWorld, renderRooms, roomFor, focusTeam, refreshCamera } from './wor
 import { initBoard, openBoard, refreshBoard, renderWhiteboard } from './board.js';
 import { initAlerts, alertApproval, alertProblem, refreshAlerts } from './alerts.js';
 import { initPreview, openPreview, renderWork, setPreviewPort } from './work.js';
+import { initSafe, openSafe, onSafeEvent } from './safe.js';
 import { initVisits, onPeer, onMessage as visitMessage, onDelta as visitDelta, onStatus as visitStatus } from './visits.js';
 
 const $ = (id) => document.getElementById(id);
@@ -52,6 +53,7 @@ function onEvent(e) {
       tasks.clear();
       for (const t of e.tasks ?? []) tasks.set(t.id, t);
       if (e.previewPort) setPreviewPort(e.previewPort);
+      renderUsage(e.usage);
       renderOffice();
       renderMemos();
       refreshAlerts();
@@ -79,6 +81,9 @@ function onEvent(e) {
       renderOffice();
       if (selected) renderHead();
       break;
+    case 'usage':
+      renderUsage(e.usage);
+      break;
     case 'task': {
       const before = tasks.get(e.task.id);
       tasks.set(e.task.id, e.task);
@@ -103,6 +108,21 @@ function onEvent(e) {
     case 'change':
       if (selected === e.agentId && panelTab === 'work') renderWork(agents.get(e.agentId), $('work'));
       break;
+    case 'vault':
+    case 'vault_value':
+    case 'vault_json':
+    case 'vault_error':
+      onSafeEvent(e);
+      break;
+    case 'vault_changed': {
+      onSafeEvent(e);
+      // A little turn of the dial when someone puts something in.
+      const dial = roomFor(e.teamId)?.querySelector('.safe');
+      dial?.classList.remove('spin');
+      void dial?.offsetWidth;
+      dial?.classList.add('spin');
+      break;
+    }
     case 'team_created':
       $('team-dialog').close();
       openChat(e.orchestratorId);
@@ -320,6 +340,52 @@ function fitStage(room) {
   stage.style.zoom = Math.max(0.35, Math.min(1, availH / stage.scrollHeight, availW / stage.scrollWidth));
 }
 
+// ---------- plan usage meter ----------
+
+let usageWarned = false;
+
+function resetText(iso, withDay) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  const time = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  return withDay ? `resets ${d.toLocaleDateString([], { weekday: 'short' })} ${time}` : `resets ${time}`;
+}
+
+function meterRow(label, w, withDay) {
+  const pct = Math.max(0, Math.min(100, Math.round(w.pct)));
+  const level = pct >= 90 ? 'high' : pct >= 70 ? 'mid' : 'low';
+  return `<span class="um-row ${level}">
+      <span class="um-top"><b>${esc(label)}</b><span>${pct}%</span></span>
+      <span class="um-bar" role="progressbar" aria-valuenow="${pct}" aria-valuemin="0" aria-valuemax="100" aria-label="${esc(label)}"><i style="width:${pct}%"></i></span>
+      <small>${esc(resetText(w.resetsAt, withDay))}</small>
+    </span>`;
+}
+
+function renderUsage(u) {
+  const el = $('usage-meter');
+  if (!u || (!u.session && !u.week)) return;
+  el.hidden = false;
+  el.classList.remove('refreshing');
+  el.innerHTML = [
+    u.session && meterRow('Current session', u.session, false),
+    u.week && meterRow('This week', u.week, true),
+    ...u.models.map((m) => meterRow(`${m.name} this week`, m, true)),
+  ]
+    .filter(Boolean)
+    .join('');
+  // One heads-up when the current session is nearly used up.
+  const pct = u.session?.pct ?? 0;
+  if (pct >= 90 && !usageWarned) {
+    usageWarned = true;
+    alertProblem('Agent Office: usage almost used up', `Current session is at ${Math.round(pct)}%. ${resetText(u.session.resetsAt, false)}.`);
+  } else if (pct < 80) usageWarned = false;
+}
+
+$('usage-meter').addEventListener('click', () => {
+  $('usage-meter').classList.add('refreshing');
+  sendWS({ type: 'refresh_usage' });
+});
+
 // ---------- teams: build and rename ----------
 
 const NAME_IDEAS = ['Sofia', 'Noah', 'Amira', 'Lucas', 'Hana', 'Elias', 'Zara', 'Felix', 'Lina', 'Jonas', 'Nora', 'Adam', 'Mila', 'Rami', 'Ines', 'Theo'];
@@ -491,6 +557,8 @@ function msgEl(m) {
     const who = agents.get(m.fromId);
     const label = m.mode === 'ask' ? 'Question from' : 'Message from';
     el.innerHTML = `<span class="from">${label} ${esc(who?.name ?? 'a teammate')}</span>${md(m.text)}`;
+  } else if (m.from === 'report') {
+    el.innerHTML = `<span class="from">Report from ${esc(agents.get(m.fromId)?.name ?? 'a teammate')}</span>${md(m.text)}`;
   } else if (m.from === 'board') {
     el.innerHTML = `<span class="from">New task on the board</span>${md(m.text)}`;
   } else if (m.from === 'boss') {
@@ -699,7 +767,9 @@ let cameraRestored = initWorld({
   onSign: (teamId) => openTeamDialog({ kind: 'rename', teamId }),
   onBoard: (teamId) => openBoard(teamId),
   onPreview: (teamId) => teams.get(teamId) && openPreview(teams.get(teamId)),
+  onSafe: (teamId) => openSafe(teamId),
 });
+initSafe({ send: sendWS, getTeam: (id) => teams.get(id) });
 initBoard({
   getTeam: (id) => teams.get(id),
   getTasks: (teamId) => [...tasks.values()].filter((t) => t.teamId === teamId).sort((a, b) => a.createdAt - b.createdAt),

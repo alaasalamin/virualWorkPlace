@@ -28,9 +28,18 @@ function frontmatter(md: string) {
   const m = md.match(/^---\n([\s\S]*?)\n---/);
   const out: Record<string, string> = {};
   if (!m) return out;
-  for (const line of m[1].split('\n')) {
-    const kv = line.match(/^(\w[\w-]*):\s*(.*)$/);
-    if (kv) out[kv[1]] = kv[2].replace(/^["']|["']$/g, '');
+  const lines = m[1].split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const kv = lines[i].match(/^(\w[\w-]*):\s*(.*)$/);
+    if (!kv) continue;
+    let value = kv[2];
+    // Folded or literal blocks ("description: >") continue on the indented lines below.
+    if (/^[>|][-+]?$/.test(value)) {
+      const block: string[] = [];
+      while (i + 1 < lines.length && /^\s+\S/.test(lines[i + 1])) block.push(lines[++i].trim());
+      value = block.join(' ');
+    }
+    out[kv[1]] = value.replace(/^["']|["']$/g, '');
   }
   return out;
 }
