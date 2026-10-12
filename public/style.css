@@ -491,6 +491,7 @@ body.chatting .map-tools { right: calc(var(--panel-w) + 16px); }
 .panel-meta { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 6px !important; }
 .chip { padding: 0 8px; font-size: 12.5px; background: var(--paper); border: 2px solid var(--ink); border-radius: 999px; }
 .chip:empty { display: none; }
+select.chip { font: inherit; font-size: 12.5px; color: inherit; cursor: pointer; }
 .usage { font-size: 12.5px; color: var(--ink-soft); }
 
 .log { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 10px; }

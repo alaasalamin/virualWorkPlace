@@ -143,7 +143,7 @@ wss.on('connection', (ws) => {
         const name = String(m.name ?? '').trim().slice(0, 40);
         const project = String(m.project ?? '').trim().slice(0, 48);
         const orchestratorName = String(m.orchestratorName ?? '').trim().slice(0, 30);
-        const model = (String(m.model) in MODELS ? String(m.model) : 'fable') as ModelKey;
+        const model = (String(m.model) in MODELS ? String(m.model) : 'opus') as ModelKey;
         let error = '';
         if (!name || !project || !orchestratorName) error = 'Fill in the team name, project and orchestrator name.';
         else if (!Number.isFinite(col) || !Number.isFinite(row) || Math.abs(col) > 50 || Math.abs(row) > 50) error = 'That spot is off the map.';
@@ -248,6 +248,13 @@ wss.on('connection', (ws) => {
         const a = getAgent(String(m.agentId));
         if (!a || a.isOrchestrator || !Array.isArray(m.skills)) break;
         const updated = updateAgent(a.id, { skills: resolveSkills(m.skills.map(String)).ids });
+        if (updated) broadcast({ type: 'agent', agent: updated });
+        break;
+      }
+      case 'set_model': {
+        // Takes effect from the agent's next turn; the session carries over.
+        if (!(String(m.model) in MODELS)) break;
+        const updated = updateAgent(String(m.agentId), { model: String(m.model) as ModelKey });
         if (updated) broadcast({ type: 'agent', agent: updated });
         break;
       }

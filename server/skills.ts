@@ -1,7 +1,7 @@
-import { readFileSync, readdirSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { cpSync, lstatSync, readFileSync, readdirSync, existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
-import { ROOT } from './store.ts';
+import { DATA_DIR, ROOT } from './store.ts';
 
 export type SkillInfo = {
   id: string; // "plugin:skill", the name the Agent SDK expects
@@ -93,4 +93,55 @@ export function resolveSkills(requested: string[]) {
     else unknown.push(r);
   }
   return { ids, unknown };
+}
+
+// Frontmatter keys a project skill keeps. Agents can edit their project's skills, so keys that
+// grant tools or run code (allowed-tools, hooks, …) are dropped rather than trusted.
+const SAFE_SKILL_KEYS = new Set(['name', 'description', 'disable-model-invocation', 'license', 'metadata']);
+
+function sanitizeSkill(raw: string) {
+  const md = raw.replace(/\r\n/g, '\n');
+  const m = md.match(/^---\n([\s\S]*?)\n---/);
+  if (!m) return md;
+  const kept: string[] = [];
+  let keep = false;
+  for (const line of m[1].split('\n')) {
+    const key = line.match(/^(\w[\w-]*):/);
+    if (key) keep = SAFE_SKILL_KEYS.has(key[1]);
+    else if (!/^\s/.test(line)) keep = false;
+    if (keep) kept.push(line);
+  }
+  return `---\n${kept.join('\n')}\n---${md.slice(m[0].length)}`;
+}
+
+// The project's own skills (<project>/.claude/skills, e.g. from Laravel Boost), copied into a
+// per-agent plugin so only the skills load, never the project's settings, hooks or MCP servers.
+// Copied fresh each turn so skills the team adds or updates show up straight away.
+export function projectSkills(agentId: string, cwd: string): { pluginPath: string; ids: string[] } | null {
+  const src = join(cwd, '.claude', 'skills');
+  const pluginPath = join(DATA_DIR, 'project-skills', agentId);
+  rmSync(pluginPath, { recursive: true, force: true });
+  if (!existsSync(src)) return null;
+  // Links are skipped: they could point the copy at files that never get sanitised.
+  cpSync(src, join(pluginPath, 'skills'), { recursive: true, filter: (p) => !lstatSync(p).isSymbolicLink() });
+  mkdirSync(join(pluginPath, '.claude-plugin'), { recursive: true });
+  writeFileSync(join(pluginPath, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'project' }));
+  for (const entry of readdirSync(join(pluginPath, 'skills'), { withFileTypes: true })) {
+    const file = join(pluginPath, 'skills', entry.name, 'SKILL.md');
+    if (entry.isDirectory() && existsSync(file)) writeFileSync(file, sanitizeSkill(readFileSync(file, 'utf8')));
+  }
+  const skills = skillsIn(pluginPath, 'project');
+  return skills.length ? { pluginPath, ids: skills.map((s) => s.id) } : null;
+}
+
+// The project's CLAUDE.md (or AGENTS.md), for workers' system prompts.
+export function projectInstructions(cwd: string): string {
+  for (const name of ['CLAUDE.md', 'AGENTS.md']) {
+    try {
+      return readFileSync(join(cwd, name), 'utf8').trim();
+    } catch {
+      // Try the next name.
+    }
+  }
+  return '';
 }

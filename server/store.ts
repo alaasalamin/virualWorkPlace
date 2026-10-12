@@ -37,6 +37,8 @@ export type Agent = {
   role: string;
   personality: string;
   model: ModelKey;
+  // Effort Claude Code reported for the last turn; null if the model has no effort levels, unset before the first turn.
+  effort?: string | null;
   project: string | null;
   cwd: string;
   isOrchestrator: boolean;

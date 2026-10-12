@@ -14,7 +14,7 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { basename } from 'node:path';
 import { realPath } from './paths.ts';
 import { requestApproval } from './approvals.ts';
-import { catalog, resolveSkills } from './skills.ts';
+import { catalog, projectInstructions, projectSkills, resolveSkills } from './skills.ts';
 
 export type ServerEvent =
   | { type: 'agent'; agent: Agent }
@@ -135,6 +135,19 @@ function permissionsFor(agent: Agent): CanUseTool {
 
 // ---------- prompts ----------
 
+// Workers don't load project settings (agents can edit them), so the project's CLAUDE.md is passed in here.
+function projectPrompt(cwd: string) {
+  const text = projectInstructions(cwd);
+  if (!text) return '';
+  return `
+
+# Project instructions (from the project's CLAUDE.md)
+
+${text}
+
+Note from the office: the project's MCP servers (such as Laravel Boost's search-docs, database-query and tinker tools) aren't connected here. Where these instructions mention them, use the project's skills, the installed package source in vendor/ and node_modules/, and approved shell commands instead.`;
+}
+
 function workerPrompt(a: Agent) {
   const boss = orchestratorOf(a.teamId);
   const team = getTeam(a.teamId);
@@ -168,7 +181,7 @@ Your team's project is "${team?.project}" (folder ${PROJECTS_DIR}/${team?.projec
 How you work:
 - Use list_team to see who is on your team and what they are doing.
 - When the team lacks a skill a task needs, call propose_agent to hire someone. Every hire needs the owner's approval, so explain briefly why in the reason field. Give each hire a real human first name that isn't already taken, a clear role, a short personality, and a model. Leave project empty to use the team's project.
-- Choose models deliberately: "haiku" for simple or repetitive work, "sonnet" for most engineering, "opus" for hard design or debugging. Never hire a "fable" worker unless the owner asks.
+- Keep usage low; the owner prefers a slower team to an expensive one. Choose models deliberately: "sonnet" by default for engineering, "haiku" for simple or repetitive work, and "opus" only for senior roles: architecture, security review and hard debugging. Never hire a "fable" worker unless the owner asks.
 - Teammates can have skills: packaged expertise such as frontend design. Use list_skills to see what's available, give fitting skills when you hire (skills field), and use request_skills to add skills to someone already on the team. The owner approves both.
 - Teammates can message each other directly, for example to request a design review or send feedback. You'll see it in their chats. You may also receive messages from them.
 - The owner can add tasks to your team's board. You'll get each one as a message with its task id. Pick who delivers it and pass the task_id to assign_task so the card moves on the board.
@@ -729,7 +742,7 @@ async function runTurn(agentId: string, text: string, origin: Origin, retried = 
     );
     options.skills = [];
   } else {
-    options.systemPrompt = { type: 'preset', preset: 'claude_code', append: workerPrompt(agent) };
+    options.systemPrompt = { type: 'preset', preset: 'claude_code', append: workerPrompt(agent) + projectPrompt(agent.cwd) };
     options.additionalDirectories = [PROJECTS_DIR];
     options.mcpServers = { team: teamServer(agent, depth) };
     options.allowedTools = [
@@ -739,7 +752,26 @@ async function runTurn(agentId: string, text: string, origin: Origin, retried = 
     const mine = catalog().filter((s) => agent.skills.includes(s.id));
     options.plugins = [...new Set(mine.map((s) => s.pluginPath))].map((path) => ({ type: 'local' as const, path }));
     options.skills = mine.map((s) => s.id);
+    // Plus the project's own skills, which every worker on the project gets.
+    const fromProject = projectSkills(agent.id, agent.cwd);
+    if (fromProject) {
+      options.plugins.push({ type: 'local', path: fromProject.pluginPath });
+      options.skills.push(...fromProject.ids);
+    }
   }
+  // Record the effort the turn actually ran at (after any downgrade for the model) so the office can show it.
+  options.hooks = {
+    Stop: [{
+      hooks: [async (input) => {
+        const effort = input.effort?.level ?? null;
+        if (getAgent(agentId)?.effort !== effort) {
+          const updated = updateAgent(agentId, { effort });
+          if (updated) broadcast({ type: 'agent', agent: updated });
+        }
+        return {};
+      }],
+    }],
+  };
 
   const texts: string[] = [];
   try {

@@ -237,10 +237,18 @@ function renderHover() {
     <dl>
       <dt>Usage</dt><dd>${used}</dd>
       <dt>Model</dt><dd>${esc(MODEL_NAMES[a.model] ?? a.model)}</dd>
+      <dt>Effort</dt><dd>${esc(effortLabel(a.effort))}</dd>
       ${a.project ? `<dt>Project</dt><dd>${esc(a.project)}</dd>` : ''}
       ${a.skills?.length ? `<dt>Skills</dt><dd>${a.skills.length}</dd>` : ''}
       <dt>Now</dt><dd>${esc((statuses[a.id]?.status ?? 'idle') === 'idle' ? 'Free' : statusLine(a))}</dd>
     </dl>`;
+}
+
+// The server learns an agent's effort at the end of each turn.
+function effortLabel(effort) {
+  if (effort === undefined) return 'After first turn';
+  if (effort === null) return 'n/a';
+  return effort === 'xhigh' ? 'Extra high' : effort[0].toUpperCase() + effort.slice(1);
 }
 
 function showHover(id) {
@@ -606,7 +614,7 @@ function renderHead() {
   $('p-name').textContent = a.name;
   $('p-role').textContent = a.role;
   $('p-team').textContent = teams.get(a.teamId)?.name ?? '';
-  $('p-model').textContent = MODEL_NAMES[a.model] ?? a.model;
+  $('p-model').value = a.model;
   $('p-project').textContent = a.project ?? '';
   $('p-cost').textContent = a.costUsd ? `≈ $${a.costUsd.toFixed(2)} of usage` : '';
   $('p-dismiss').hidden = a.isOrchestrator;
@@ -719,6 +727,10 @@ $('input').addEventListener('keydown', (e) => {
   }
 });
 $('p-stop').addEventListener('click', () => sendWS({ type: 'stop', agentId: selected }));
+$('p-model').addEventListener('change', (e) => {
+  if (selected) sendWS({ type: 'set_model', agentId: selected, model: e.target.value });
+});
+
 $('p-dismiss').addEventListener('click', () => {
   const btn = $('p-dismiss');
   const a = agents.get(selected);

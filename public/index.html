@@ -53,9 +53,9 @@
       </label>
       <label class="new-only">Orchestrator's model
         <select name="model">
-          <option value="fable">Fable (most capable, uses limits fastest)</option>
           <option value="opus">Opus</option>
-          <option value="sonnet">Sonnet</option>
+          <option value="sonnet">Sonnet (uses limits slowest)</option>
+          <option value="fable">Fable (most capable, uses limits fastest)</option>
         </select>
       </label>
       <p class="form-error" id="td-error" hidden></p>
@@ -131,7 +131,12 @@
       <div class="panel-who">
         <h2 id="p-name"></h2>
         <p id="p-role"></p>
-        <p class="panel-meta"><span class="chip" id="p-team"></span><span class="chip" id="p-model"></span><span class="chip" id="p-project"></span><span class="usage" id="p-cost" title="Estimated API-equivalent cost of this agent's work. On a Max plan this comes out of your usage limits, not money."></span></p>
+        <p class="panel-meta"><span class="chip" id="p-team"></span><select class="chip" id="p-model" aria-label="Model" title="Model for this agent's next turns">
+          <option value="haiku">Haiku</option>
+          <option value="sonnet">Sonnet</option>
+          <option value="opus">Opus</option>
+          <option value="fable">Fable</option>
+        </select><span class="chip" id="p-project"></span><span class="usage" id="p-cost" title="Estimated API-equivalent cost of this agent's work. On a Max plan this comes out of your usage limits, not money."></span></p>
       </div>
       <button class="icon-btn" id="p-close" aria-label="Close chat">✕</button>
     </header>
