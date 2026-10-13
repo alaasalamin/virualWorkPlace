@@ -76,6 +76,8 @@ export type Task = {
   parentId?: string;
   status: TaskStatus;
   result?: string;
+  // When the assignee started on it (it moved to doing or review); used to estimate finish times.
+  startedAt?: number;
   createdAt: number;
   updatedAt: number;
 };
@@ -277,7 +279,9 @@ export function addTask(t: Pick<Task, 'teamId' | 'kind' | 'title' | 'detail' | '
 export function updateTask(id: string, patch: Partial<Pick<Task, 'status' | 'result'>>) {
   const t = state.tasks.find((x) => x.id === id);
   if (!t) return;
-  Object.assign(t, patch, { updatedAt: Date.now() });
+  const now = Date.now();
+  const starting = (patch.status === 'doing' || patch.status === 'review') && t.status !== patch.status;
+  Object.assign(t, patch, { updatedAt: now }, starting ? { startedAt: now } : {});
   save();
   return t;
 }

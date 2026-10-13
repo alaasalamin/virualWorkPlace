@@ -1,5 +1,6 @@
 import { stationSVG, portraitSVG } from './characters.js';
 import { initWorld, renderRooms, roomFor, focusTeam, refreshCamera } from './world.js';
+import { describeWorker, teamEstimate, workerEstimate } from './eta.js';
 import { initBoard, openBoard, refreshBoard, refreshVisions, renderVisionBar, renderWhiteboard } from './board.js';
 import { initAlerts, alertApproval, alertProblem, refreshAlerts } from './alerts.js';
 import { initPreview, openPreview, renderWork, setPreviewPort } from './work.js';
@@ -252,7 +253,20 @@ function renderHover() {
       ${a.project ? `<dt>Project</dt><dd>${esc(a.project)}</dd>` : ''}
       ${a.skills?.length ? `<dt>Skills</dt><dd>${a.skills.length}</dd>` : ''}
       <dt>Now</dt><dd>${esc((statuses[a.id]?.status ?? 'idle') === 'idle' ? 'Free' : statusLine(a))}</dd>
+      ${etaRows(a).map(([k, v]) => `<dt>${esc(k)}</dt><dd${k === 'Task' ? ' class="clamp"' : ''}>${esc(v)}</dd>`).join('')}
     </dl>`;
+}
+
+// Expected finish times while an agent (or, for an orchestrator, their team) is working.
+function etaRows(a) {
+  const list = [...tasks.values()];
+  if (a.isOrchestrator) {
+    const workers = [...agents.values()].filter((x) => x.teamId === a.teamId && !x.isOrchestrator);
+    return teamEstimate(workers, list) ?? [];
+  }
+  if ((statuses[a.id]?.status ?? 'idle') === 'idle') return [];
+  const est = workerEstimate(a, list);
+  return est ? describeWorker(est) : [];
 }
 
 // The server learns an agent's effort at the end of each turn.
@@ -262,9 +276,14 @@ function effortLabel(effort) {
   return effort === 'xhigh' ? 'Extra high' : effort[0].toUpperCase() + effort.slice(1);
 }
 
+// Keeps the time estimates on an open hover card current.
+let hoverTimer = null;
+
 function showHover(id) {
   hoverId = id;
   renderHover();
+  clearInterval(hoverTimer);
+  hoverTimer = setInterval(renderHover, 30_000);
   const card = $('hovercard');
   const el = document.querySelector(`.station[data-id="${id}"]`);
   if (!el) return;
@@ -281,6 +300,7 @@ function showHover(id) {
 }
 
 function hideHover() {
+  clearInterval(hoverTimer);
   hoverId = null;
   $('hovercard').hidden = true;
 }
