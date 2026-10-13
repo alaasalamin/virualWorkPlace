@@ -1,6 +1,6 @@
 import { stationSVG, portraitSVG } from './characters.js';
 import { initWorld, renderRooms, roomFor, focusTeam, refreshCamera } from './world.js';
-import { initBoard, openBoard, refreshBoard, renderWhiteboard } from './board.js';
+import { initBoard, openBoard, refreshBoard, refreshVisions, renderVisionBar, renderWhiteboard } from './board.js';
 import { initAlerts, alertApproval, alertProblem, refreshAlerts } from './alerts.js';
 import { initPreview, openPreview, renderWork, setPreviewPort } from './work.js';
 import { initSafe, openSafe, onSafeEvent } from './safe.js';
@@ -9,6 +9,7 @@ import { initVisits, onPeer, onMessage as visitMessage, onDelta as visitDelta, o
 const $ = (id) => document.getElementById(id);
 const teams = new Map();
 const tasks = new Map();
+const visions = new Map();
 let panelTab = 'chat';
 const agents = new Map();
 const statuses = {};
@@ -52,6 +53,8 @@ function onEvent(e) {
       for (const a of e.approvals) approvals.set(a.id, a);
       tasks.clear();
       for (const t of e.tasks ?? []) tasks.set(t.id, t);
+      visions.clear();
+      for (const v of e.visions ?? []) visions.set(v.id, v);
       if (e.previewPort) setPreviewPort(e.previewPort);
       renderUsage(e.usage);
       renderOffice();
@@ -105,6 +108,14 @@ function onEvent(e) {
       }
       break;
     }
+    case 'vision':
+      visions.set(e.vision.id, e.vision);
+      showVisions(e.vision.teamId);
+      break;
+    case 'vision_removed':
+      visions.delete(e.visionId);
+      showVisions(e.teamId);
+      break;
     case 'change':
       if (selected === e.agentId && panelTab === 'work') renderWork(agents.get(e.agentId), $('work'));
       break;
@@ -331,10 +342,17 @@ function renderOffice() {
     if (boss && !front.querySelector(`[data-id="${boss.id}"]`)) front.appendChild(makeStation(boss));
     fitStage(room);
     renderWhiteboard(room, t.id);
+    renderVisionBar(room, t.id);
   }
   for (const a of agents.values()) updateStation(a.id);
   const people = agents.size;
   $('team-count').textContent = `${list.length} ${list.length === 1 ? 'team' : 'teams'}, ${people} ${people === 1 ? 'person' : 'people'}`;
+}
+
+function showVisions(teamId) {
+  const room = roomFor(teamId);
+  if (room) renderVisionBar(room, teamId);
+  refreshVisions(teamId);
 }
 
 // Shrink a team's desks until they all fit inside its room.
@@ -785,6 +803,8 @@ initSafe({ send: sendWS, getTeam: (id) => teams.get(id) });
 initBoard({
   getTeam: (id) => teams.get(id),
   getTasks: (teamId) => [...tasks.values()].filter((t) => t.teamId === teamId).sort((a, b) => a.createdAt - b.createdAt),
+  getVisions: (teamId) => [...visions.values()].filter((v) => v.teamId === teamId),
+  onRemoveVision: (visionId) => sendWS({ type: 'remove_vision', visionId }),
   getAgent: (id) => agents.get(id),
   onAction: (taskId, action) => sendWS({ type: 'task_action', taskId, action }),
   onAdd: (teamId, title, detail) => sendWS({ type: 'add_task', teamId, title, detail }),

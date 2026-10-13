@@ -13,7 +13,7 @@ import { cardTitle, createTask, onRuntimeEvent, scrubHistory, send, stop, triage
 import { changesFor, flushChanges, loadChanges } from './changes.ts';
 import { latestUsage, onUsage, refreshUsage, startUsagePolling, stopUsagePolling } from './usage.ts';
 import { checkName, checkVaultAccess, deleteKey, exportJson, importJson, listKeys, readValue, setValue } from './vault.ts';
-import { PROJECTS_DIR, getTeam, orchestratorOf, removeTask, tasks } from './store.ts';
+import { PROJECTS_DIR, getTeam, orchestratorOf, removeTask, removeVision, tasks, visions } from './store.ts';
 
 const HOST = '127.0.0.1';
 const PORT = Number(process.env.PORT ?? 4545);
@@ -100,6 +100,7 @@ wss.on('connection', (ws) => {
       statuses: Object.fromEntries(statuses),
       approvals: pendingApprovals(),
       tasks: tasks(),
+      visions: visions(),
       usage: latestUsage(),
       previewPort: PREVIEW_PORT,
       skills: catalog().map(({ id, name, description, plugin }) => ({ id, name, description, plugin })),
@@ -249,6 +250,13 @@ wss.on('connection', (ws) => {
         if (!a || a.isOrchestrator || !Array.isArray(m.skills)) break;
         const updated = updateAgent(a.id, { skills: resolveSkills(m.skills.map(String)).ids });
         if (updated) broadcast({ type: 'agent', agent: updated });
+        break;
+      }
+      case 'remove_vision': {
+        const v = visions().find((x) => x.id === String(m.visionId));
+        if (!v) break;
+        removeVision(v.id);
+        broadcast({ type: 'vision_removed', visionId: v.id, teamId: v.teamId });
         break;
       }
       case 'set_model': {

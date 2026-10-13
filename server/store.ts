@@ -80,11 +80,27 @@ export type Task = {
   updatedAt: number;
 };
 
-type State = { teams: Team[]; agents: Agent[]; chats: Record<string, ChatMsg[]>; tasks: Task[] };
+// A feature or goal the owner described, broken into milestones by the orchestrator.
+// Progress is milestones done out of all milestones.
+export type MilestoneStatus = 'todo' | 'doing' | 'done';
+export type Milestone = { title: string; status: MilestoneStatus };
+export type VisionStatus = 'active' | 'done' | 'dropped';
+export type Vision = {
+  id: string;
+  teamId: string;
+  title: string;
+  summary: string;
+  milestones: Milestone[];
+  status: VisionStatus;
+  createdAt: number;
+  updatedAt: number;
+};
+
+type State = { teams: Team[]; agents: Agent[]; chats: Record<string, ChatMsg[]>; tasks: Task[]; visions: Vision[] };
 
 const MAX_CHAT = 300;
 
-let state: State = { teams: [], agents: [], chats: {}, tasks: [] };
+let state: State = { teams: [], agents: [], chats: {}, tasks: [], visions: [] };
 // Status is runtime-only: nothing is "working" after a restart.
 export const statuses = new Map<string, { status: Status; detail: string }>();
 
@@ -95,6 +111,7 @@ export function load() {
   if (existsSync(STATE_FILE)) state = JSON.parse(readFileSync(STATE_FILE, 'utf8'));
   state.teams ??= [];
   state.tasks ??= [];
+  state.visions ??= [];
   migrateToTeams();
   // Tasks that were running when the app stopped can't finish now.
   for (const t of state.tasks) {
@@ -270,6 +287,37 @@ export function removeTask(id: string) {
   save();
 }
 
+export const visions = () => state.visions;
+export const visionsOf = (teamId: string) => state.visions.filter((v) => v.teamId === teamId);
+
+export function addVision(v: Pick<Vision, 'teamId' | 'title' | 'summary'> & { milestones: string[] }) {
+  const now = Date.now();
+  const vision: Vision = {
+    ...v,
+    // Short, so the orchestrator can quote it back easily.
+    id: randomUUID().slice(0, 8),
+    milestones: v.milestones.map((title) => ({ title, status: 'todo' })),
+    status: 'active',
+    createdAt: now,
+    updatedAt: now,
+  };
+  state.visions.push(vision);
+  save();
+  return vision;
+}
+
+// Bumps updatedAt and saves after the caller changed a vision in place.
+export function touchVision(v: Vision) {
+  v.updatedAt = Date.now();
+  save();
+  return v;
+}
+
+export function removeVision(id: string) {
+  state.visions = state.visions.filter((v) => v.id !== id);
+  save();
+}
+
 // Rewrite every stored text of a team (chats and task cards), e.g. to scrub a secret.
 export function rewriteTeamText(teamId: string, fn: (text: string) => string) {
   let changed = false;
@@ -284,6 +332,12 @@ export function rewriteTeamText(teamId: string, fn: (text: string) => string) {
       const v = t[f];
       if (typeof v === 'string' && fn(v) !== v) (t[f] = fn(v)), (changed = true);
     }
+  }
+  for (const v of state.visions.filter((x) => x.teamId === teamId)) {
+    for (const f of ['title', 'summary'] as const) {
+      if (fn(v[f]) !== v[f]) (v[f] = fn(v[f])), (changed = true);
+    }
+    for (const m of v.milestones) if (fn(m.title) !== m.title) (m.title = fn(m.title)), (changed = true);
   }
   if (changed) save();
   return changed;

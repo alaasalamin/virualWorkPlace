@@ -728,6 +728,61 @@ select.chip { font: inherit; font-size: 12.5px; color: inherit; cursor: pointer;
 .wb-col[data-col="done"] .sticky { background: #C6EFD4; }
 .plant { right: 380px; }
 
+/* ---------- visions: progress bars on the wall and the board ---------- */
+
+.vbar { display: flex; gap: 3px; height: 14px; padding: 2px; background: #fff; border: 2px solid var(--ink); border-radius: 999px; overflow: hidden; }
+.vbar i { flex: 1; min-width: 4px; background: #E4E9EF; border-radius: 2px; }
+.vbar i:first-child { border-radius: 999px 2px 2px 999px; }
+.vbar i:last-child { border-radius: 2px 999px 999px 2px; }
+.vbar i:only-child { border-radius: 999px; }
+.vbar i.done { background: var(--go); }
+.vbar i.doing { background: repeating-linear-gradient(-45deg, var(--sun) 0 5px, #FFE58A 5px 10px); }
+.vcount { font: 600 14px/1 var(--display); color: var(--ink-soft); white-space: nowrap; }
+
+.vision-bar {
+  position: absolute;
+  left: 50%;
+  top: 148px;
+  translate: -50% 0;
+  width: 460px;
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 12px;
+  background: var(--paper);
+  border: 3px solid var(--ink);
+  border-radius: 12px;
+  box-shadow: 0 3px 0 var(--ink);
+  cursor: pointer;
+}
+.vision-bar[hidden] { display: none; }
+.vision-bar:hover { background: #fff; }
+.vision-bar b { max-width: 170px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 600 15px/1.2 var(--display); }
+/* With a vision showing, the project name moves up to make room. */
+.room:has(.vision-bar:not([hidden])) .project-tag { top: 122px; font-size: 15px; }
+
+.board-visions { display: flex; flex-direction: column; gap: 8px; max-height: 38%; padding: 14px 16px 0; overflow-y: auto; }
+.board-visions[hidden] { display: none; }
+.board-visions h3 { margin: 0; font: 600 17px/1.2 var(--display); }
+.vision { background: #F1F4F8; border: 2px solid var(--ink); border-radius: 12px; }
+.vision.dropped { opacity: .65; }
+.vision summary { display: grid; gap: 6px; padding: 10px 12px; cursor: pointer; list-style: none; }
+.vision summary::-webkit-details-marker { display: none; }
+.vhead { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.vhead b { font: 600 16px/1.2 var(--display); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.vhead .vcount { margin-left: auto; font-size: 13px; }
+.vstatus { padding: 0 8px; font: 600 12px/20px var(--display); border: 2px solid var(--ink); border-radius: 999px; background: #E3F7EC; }
+.vstatus.dropped { background: #E4E9EF; }
+.vsummary { margin: 0 12px 6px; font-size: 14px; color: var(--ink-soft); }
+.milestones { display: grid; gap: 4px; margin: 0 12px 6px; padding: 0; list-style: none; font-size: 14px; }
+.milestones li { display: flex; align-items: baseline; gap: 8px; }
+.milestones li span { flex: none; width: 82px; padding: 0 6px; font: 600 11.5px/18px var(--display); text-align: center; border: 2px solid var(--ink); border-radius: 999px; background: #fff; }
+.milestones li.doing span { background: var(--sun); }
+.milestones li.done span { background: #C6EFD4; }
+.milestones li.done { color: var(--ink-soft); }
+.vision .link-btn { margin: 0 10px 8px; font-size: 13px; color: var(--ink-soft); }
+
 /* ---------- dialogs: board and preview ---------- */
 
 .board-dialog, .preview-dialog {

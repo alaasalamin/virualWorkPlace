@@ -13,6 +13,8 @@ const STICKIES_SHOWN = 6;
 let ctx = {
   getTeam: () => undefined,
   getTasks: () => [],
+  getVisions: () => [],
+  onRemoveVision: () => {},
   getAgent: () => undefined,
   getOrchestrator: () => undefined,
   onCard: () => {},
@@ -50,6 +52,18 @@ export function initBoard(c) {
     ctx.onAdd(openTeamId, title, f.detail.value.trim());
     adding = false;
     renderBoard();
+  });
+  $('board-visions').addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-remove-vision]');
+    if (!btn) return;
+    // Two clicks, so a stray one doesn't delete a vision.
+    if (!btn.dataset.armed) {
+      btn.dataset.armed = '1';
+      btn.textContent = 'Click again to remove';
+      return;
+    }
+    btn.disabled = true;
+    ctx.onRemoveVision(btn.dataset.removeVision);
   });
   $('board-cols').addEventListener('keydown', (e) => {
     if ((e.key === 'Enter' || e.key === ' ') && e.target.matches('[data-assignee]')) {
@@ -99,6 +113,62 @@ export function renderWhiteboard(room, teamId) {
     'aria-label',
     `Task board: ${counts.todo} to do, ${counts.doing} in progress, ${counts.review} in review, ${counts.done} done`,
   );
+}
+
+// ---------- visions ----------
+
+const VISION_ORDER = { active: 0, done: 1, dropped: 2 };
+const MILESTONE_WORDS = { todo: 'To do', doing: 'In progress', done: 'Done' };
+
+function sortedVisions(teamId) {
+  return [...ctx.getVisions(teamId)].sort((a, b) => VISION_ORDER[a.status] - VISION_ORDER[b.status] || b.updatedAt - a.updatedAt);
+}
+
+function doneCount(v) {
+  return v.milestones.filter((m) => m.status === 'done').length;
+}
+
+// One segment per milestone: filled when done, striped while in progress.
+function barHTML(v) {
+  return `<span class="vbar" role="img" aria-label="${doneCount(v)} of ${v.milestones.length} milestones done">${v.milestones
+    .map((m) => `<i class="${m.status}" title="${esc(m.title)}: ${MILESTONE_WORDS[m.status].toLowerCase()}"></i>`)
+    .join('')}</span>`;
+}
+
+// The bar on the building's wall shows the active vision that moved most recently.
+export function renderVisionBar(room, teamId) {
+  const el = room.querySelector('.vision-bar');
+  const active = sortedVisions(teamId).filter((v) => v.status === 'active');
+  el.hidden = !active.length;
+  if (!active.length) return;
+  const v = active[0];
+  const more = active.length - 1;
+  el.innerHTML = `<b>${esc(v.title)}</b>${barHTML(v)}<span class="vcount">${doneCount(v)}/${v.milestones.length}${more ? ` · +${more} more` : ''}</span>`;
+  el.setAttribute('aria-label', `Vision ${v.title}: ${doneCount(v)} of ${v.milestones.length} milestones done. Open the task board`);
+}
+
+function visionHTML(v, open) {
+  const chip = v.status === 'active' ? '' : `<span class="vstatus ${v.status}">${v.status === 'done' ? 'Done' : 'Dropped'}</span>`;
+  return `<details class="vision ${v.status}" data-vision="${esc(v.id)}"${open ? ' open' : ''}>
+      <summary>
+        <span class="vhead"><b>${esc(v.title)}</b>${chip}<span class="vcount">${doneCount(v)} of ${v.milestones.length} milestones</span></span>
+        ${barHTML(v)}
+      </summary>
+      ${v.summary ? `<p class="vsummary">${esc(v.summary)}</p>` : ''}
+      <ol class="milestones">${v.milestones.map((m) => `<li class="${m.status}"><span>${MILESTONE_WORDS[m.status]}</span>${esc(m.title)}</li>`).join('')}</ol>
+      <button class="link-btn" data-remove-vision="${esc(v.id)}">Remove vision</button>
+    </details>`;
+}
+
+function renderVisions() {
+  const list = sortedVisions(openTeamId);
+  const box = $('board-visions');
+  // Keep visions the owner opened or closed that way across live updates; active ones start open.
+  const was = new Map([...box.querySelectorAll('details[data-vision]')].map((d) => [d.dataset.vision, d.open]));
+  box.hidden = !list.length;
+  box.innerHTML = list.length
+    ? `<h3>Visions</h3>${list.map((v) => visionHTML(v, was.get(v.id) ?? v.status === 'active')).join('')}`
+    : '';
 }
 
 function ago(ts) {
@@ -156,6 +226,7 @@ function renderBoard() {
   const team = ctx.getTeam(openTeamId);
   if (!team) return;
   $('board-title').textContent = `${team.name}: task board`;
+  renderVisions();
   const all = ctx.getTasks(openTeamId);
   const list = topLevel(all);
   const partsOf = (t) => all.filter((p) => p.parentId === t.id);
@@ -192,4 +263,9 @@ export function openBoard(teamId) {
 export function refreshBoard(teamId) {
   // Don't wipe a half-typed task.
   if (openTeamId && openTeamId === teamId && !adding) renderBoard();
+}
+
+export function refreshVisions(teamId) {
+  // Only the visions section, so a half-typed task survives.
+  if (openTeamId && openTeamId === teamId) renderVisions();
 }

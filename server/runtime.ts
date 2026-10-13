@@ -5,8 +5,8 @@ import { resolve, sep } from 'node:path';
 import {
   MODELS, PROJECTS_DIR, addAgent, addChat, findAgentByName, getAgent, getTeam, orchestratorOf, statuses, teamMembers, updateAgent,
 } from './store.ts';
-import { addTask, rewriteTeamText, tasks, tasksOf, updateTask } from './store.ts';
-import type { Agent, ChatMsg, ModelKey, Status, Task } from './store.ts';
+import { addTask, addVision, rewriteTeamText, tasks, tasksOf, touchVision, updateTask, visionsOf } from './store.ts';
+import type { Agent, ChatMsg, MilestoneStatus, ModelKey, Status, Task, Vision, VisionStatus } from './store.ts';
 import { dropEdit, recordEdit } from './changes.ts';
 import { noteRateLimit } from './usage.ts';
 import { checkName, deleteKey, envFileText, exportJson, isSensitive, listKeys, readValue, setValue, vaultVersion } from './vault.ts';
@@ -23,6 +23,8 @@ export type ServerEvent =
   | { type: 'message'; msg: ChatMsg }
   | { type: 'peer'; fromId: string; toId: string; mode: 'message' | 'ask' | 'assign'; text: string }
   | { type: 'task'; task: Task }
+  | { type: 'vision'; vision: Vision }
+  | { type: 'vision_removed'; visionId: string; teamId: string }
   | { type: 'change'; agentId: string }
   | { type: 'vault_changed'; teamId: string };
 
@@ -189,6 +191,7 @@ How you work:
 - Use assign_task to hand a teammate a concrete, self-contained task. They don't see this conversation, so include all context they need. It returns immediately, and their report arrives later as a message, so keep the team working in parallel: hand out independent tasks to different people at the same time.
 - Before assigning, check list_team. Prefer a teammate who is free and whose role and skills fit. If the best fit is busy, give it to another free teammate who can do it well; queue it behind the busy one only when nobody else fits, or propose a hire if the team is stretched.
 - When work depends on other work (build, then review), assign the next step when the report for the first arrives.
+- When the owner describes a new feature or goal (a vision), call create_vision before planning the work, with milestones that each end in something checkable. The owner watches its progress bar on your team's wall. Pass vision_id and the milestone number with assign_task. Mark a milestone done with update_vision only once the reports show it's finished and reviewed, and add milestones when the scope grows. Use list_visions to see where each vision stands.
 - Don't hire more people than the work needs. Reuse existing teammates when they fit.
 - You can read files in the projects folder (${PROJECTS_DIR}) to check work, but you don't edit files yourself.
 Keep replies to the owner short and conversational. Tell them what you're doing and what came back.`;
@@ -213,6 +216,28 @@ function moveTask(id: string, patch: Parameters<typeof updateTask>[1]) {
   if (teamId && patch.result) patch = { ...patch, result: redact(teamId, patch.result) };
   const task = updateTask(id, patch);
   if (task) broadcast({ type: 'task', task });
+}
+
+// ---------- visions ----------
+
+function findVision(teamId: string, id: string) {
+  return visionsOf(teamId).find((v) => v.id === id.trim());
+}
+
+function visionText(v: Vision) {
+  const done = v.milestones.filter((m) => m.status === 'done').length;
+  const lines = v.milestones.map((m, i) => `  ${i + 1}. [${MILESTONE_WORDS[m.status]}] ${m.title}`);
+  return `- ${v.title} (id ${v.id}; ${v.status}; ${done} of ${v.milestones.length} milestones done)\n  ${v.summary}\n${lines.join('\n')}`;
+}
+
+const MILESTONE_WORDS: Record<MilestoneStatus, string> = { todo: 'to do', doing: 'in progress', done: 'done' };
+
+function saveVision(v: Vision) {
+  // A vision whose milestones are all done is finished; adding a milestone reopens it.
+  const allDone = v.milestones.length > 0 && v.milestones.every((m) => m.status === 'done');
+  if (v.status === 'active' && allDone) v.status = 'done';
+  else if (v.status === 'done' && !allDone) v.status = 'active';
+  broadcast({ type: 'vision', vision: touchVision(v) });
 }
 
 const STATUS_WORDS: Record<string, string> = { todo: 'to do', doing: 'in progress', review: 'in review', done: 'done', blocked: 'stopped' };
@@ -325,6 +350,51 @@ function officeServer(boss: Agent) {
         },
       ),
       tool(
+        'create_vision',
+        "Start tracking a feature or goal the owner described (a vision) with a progress bar on the team's wall. Break it into milestones that each end in something checkable. Returns the vision's id.",
+        {
+          title: z.string().describe('Short name, e.g. "Website builder", under 40 characters'),
+          summary: z.string().describe("One or two sentences on what the owner wants and why"),
+          milestones: z.array(z.string()).min(2).max(12).describe('In order; each a short outcome, e.g. "Templates can be picked and previewed"'),
+        },
+        async ({ title, summary, milestones }) => {
+          const r = (t: string) => redact(teamId, t.trim());
+          const v = addVision({ teamId, title: r(title).slice(0, 60), summary: r(summary), milestones: milestones.map(r).filter(Boolean) });
+          broadcast({ type: 'vision', vision: v });
+          return { content: [{ type: 'text', text: `Created. Pass vision_id "${v.id}" and a milestone number with assign_task.\n${visionText(v)}` }] };
+        },
+      ),
+      tool(
+        'update_vision',
+        "Update a vision's progress: mark milestones in progress or done, add milestones when the scope grows, or mark the whole vision done or dropped. Mark a milestone done only when the reports show it's finished and reviewed.",
+        {
+          vision_id: z.string(),
+          milestones: z
+            .array(z.object({ number: z.number().int().min(1), status: z.enum(['todo', 'doing', 'done']) }))
+            .optional()
+            .describe('Milestone numbers as shown by list_visions, starting at 1'),
+          add_milestones: z.array(z.string()).optional().describe('New milestones, added at the end'),
+          status: z.enum(['active', 'done', 'dropped']).optional().describe('Only to finish or drop the whole vision'),
+        },
+        async ({ vision_id, milestones, add_milestones, status }) => {
+          const v = findVision(teamId, vision_id);
+          if (!v) return { content: [{ type: 'text', text: `No vision ${vision_id}. Use list_visions.` }], isError: true };
+          const bad = (milestones ?? []).filter((m) => m.number > v.milestones.length).map((m) => m.number);
+          if (bad.length) {
+            return { content: [{ type: 'text', text: `There's no milestone ${bad.join(', ')}; this vision has ${v.milestones.length}.` }], isError: true };
+          }
+          for (const m of milestones ?? []) v.milestones[m.number - 1].status = m.status;
+          for (const t of add_milestones ?? []) if (t.trim()) v.milestones.push({ title: redact(teamId, t.trim()), status: 'todo' });
+          if (status) v.status = status as VisionStatus;
+          saveVision(v);
+          return { content: [{ type: 'text', text: `Updated.\n${visionText(v)}` }] };
+        },
+      ),
+      tool('list_visions', "See the team's visions and how far each one is.", {}, async () => {
+        const list = visionsOf(teamId).filter((v) => v.status !== 'dropped');
+        return { content: [{ type: 'text', text: list.length ? list.map(visionText).join('\n\n') : 'No visions yet.' }] };
+      }),
+      tool(
         'propose_agent',
         'Propose hiring a new agent. Blocks until the office owner approves or rejects, then returns the decision.',
         {
@@ -378,12 +448,24 @@ function officeServer(boss: Agent) {
             .describe('Wait here for their report instead. Only for quick answers you need before you can continue.'),
           title: z.string().optional().describe('Short card title for the task board, under 60 characters'),
           task_id: z.string().optional().describe("The board task's id, when this assignment delivers (part of) a task from the board"),
+          vision_id: z.string().optional().describe('The vision this work moves forward'),
+          milestone: z.number().int().min(1).optional().describe("The vision's milestone number this work is for"),
           task: z.string(),
         },
-        async ({ agent_name, title, task_id, task, wait }) => {
+        async ({ agent_name, title, task_id, vision_id, milestone, task, wait }) => {
           const a = member(agent_name);
           if (!a) {
             return { content: [{ type: 'text', text: `No one named ${agent_name} on your team. Use list_team.` }], isError: true };
+          }
+          const vision = vision_id ? findVision(teamId, vision_id) : undefined;
+          if (vision_id && !vision) return { content: [{ type: 'text', text: `No vision ${vision_id}. Use list_visions.` }], isError: true };
+          if (vision && milestone && milestone > vision.milestones.length) {
+            return { content: [{ type: 'text', text: `There's no milestone ${milestone}; this vision has ${vision.milestones.length}.` }], isError: true };
+          }
+          // Work starting on a milestone shows it as in progress on the wall.
+          if (vision && milestone && vision.milestones[milestone - 1].status === 'todo') {
+            vision.milestones[milestone - 1].status = 'doing';
+            saveVision(vision);
           }
           let parentId: string | undefined;
           if (task_id) {
@@ -737,7 +819,10 @@ async function runTurn(agentId: string, text: string, origin: Origin, retried = 
     options.tools = ['Read', 'Glob', 'Grep'];
     options.additionalDirectories = [PROJECTS_DIR];
     options.mcpServers = { office: officeServer(agent) };
-    options.allowedTools = ['list_team', 'list_tasks', 'vault_list', 'list_skills', 'propose_agent', 'request_skills', 'assign_task'].map(
+    options.allowedTools = [
+      'list_team', 'list_tasks', 'vault_list', 'list_skills', 'propose_agent', 'request_skills', 'assign_task',
+      'create_vision', 'update_vision', 'list_visions',
+    ].map(
       (t) => `mcp__office__${t}`,
     );
     options.skills = [];

@@ -199,6 +199,7 @@ function makeRoom(team) {
     <div class="wall">
       <button class="sign" title="Rename team"></button>
       <p class="project-tag"></p>
+      <button class="vision-bar" hidden></button>
       <div class="window" aria-hidden="true"><span></span><span></span><span></span><span></span></div>
       <button class="tv" title="Preview the team's site"><span class="tv-screen"><span>Preview</span></span></button>
       <div class="plant" aria-hidden="true">${PLANT}</div>
@@ -228,6 +229,7 @@ function makeRoom(team) {
     </div>`;
   el.querySelector('.sign').addEventListener('click', () => handlers.onSign(team.id));
   el.querySelector('.whiteboard').addEventListener('click', () => handlers.onBoard(team.id));
+  el.querySelector('.vision-bar').addEventListener('click', () => handlers.onBoard(team.id));
   el.querySelector('.tv').addEventListener('click', () => handlers.onPreview(team.id));
   el.querySelector('.safe').addEventListener('click', () => handlers.onSafe(team.id));
   world.appendChild(el);
