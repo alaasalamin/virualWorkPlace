@@ -198,6 +198,7 @@ function makeRoom(team) {
   el.innerHTML = `
     <div class="wall">
       <button class="sign" title="Rename team"></button>
+      <button class="reset-team" title="Clear every agent's memory, like /clear">Reset</button>
       <p class="project-tag"></p>
       <button class="vision-bar" hidden></button>
       <div class="window" aria-hidden="true"><span></span><span></span><span></span><span></span></div>
@@ -232,6 +233,27 @@ function makeRoom(team) {
   el.querySelector('.vision-bar').addEventListener('click', () => handlers.onBoard(team.id));
   el.querySelector('.tv').addEventListener('click', () => handlers.onPreview(team.id));
   el.querySelector('.safe').addEventListener('click', () => handlers.onSafe(team.id));
+  // Two clicks: the first asks, the second clears.
+  const reset = el.querySelector('.reset-team');
+  let armed;
+  reset.addEventListener('click', () => {
+    if (armed) {
+      clearTimeout(armed);
+      armed = undefined;
+      handlers.onReset(team.id);
+      reset.textContent = 'Cleared';
+      reset.classList.remove('armed');
+      setTimeout(() => (reset.textContent = 'Reset'), 2000);
+      return;
+    }
+    reset.textContent = 'Clear all memory?';
+    reset.classList.add('armed');
+    armed = setTimeout(() => {
+      armed = undefined;
+      reset.textContent = 'Reset';
+      reset.classList.remove('armed');
+    }, 4000);
+  });
   world.appendChild(el);
   return el;
 }

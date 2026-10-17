@@ -9,7 +9,7 @@ import {
 import type { ModelKey } from './store.ts';
 import { catalog, ensureOfficePlugin, resolveSkills } from './skills.ts';
 import { decide, onApprovalChange, pendingApprovals } from './approvals.ts';
-import { cardTitle, createTask, onRuntimeEvent, scrubHistory, send, stop, triageTask } from './runtime.ts';
+import { cardTitle, createTask, onRuntimeEvent, resetTeamMemory, scrubHistory, send, stop, triageTask } from './runtime.ts';
 import { changesFor, flushChanges, loadChanges } from './changes.ts';
 import { latestUsage, onUsage, refreshUsage, startUsagePolling, stopUsagePolling } from './usage.ts';
 import { checkName, checkVaultAccess, deleteKey, exportJson, importJson, listKeys, readValue, setValue } from './vault.ts';
@@ -132,6 +132,11 @@ wss.on('connection', (ws) => {
       case 'stop':
         stop(String(m.agentId));
         break;
+      case 'reset_team': {
+        const teamId = String(m.teamId);
+        if (getTeam(teamId)) resetTeamMemory(teamId);
+        break;
+      }
       case 'rename': {
         const name = String(m.name ?? '').trim().slice(0, 40);
         const a = name && updateAgent(String(m.agentId), { name });

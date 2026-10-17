@@ -91,6 +91,20 @@ body.chatting .viewport { right: var(--panel-w); }
   cursor: pointer;
 }
 .sign:hover { background: #fff; }
+.reset-team {
+  position: absolute;
+  right: 30px;
+  top: 30px;
+  padding: 8px 16px;
+  font: 600 16px/1.2 var(--display);
+  background: var(--paper);
+  border: 3px solid var(--ink);
+  border-radius: 10px;
+  box-shadow: 0 4px 0 var(--ink);
+  cursor: pointer;
+}
+.reset-team:hover { background: #fff; }
+.reset-team.armed { color: #fff; background: var(--stop); }
 .project-tag {
   position: absolute;
   left: 50%;

@@ -818,6 +818,7 @@ let cameraRestored = initWorld({
   onBoard: (teamId) => openBoard(teamId),
   onPreview: (teamId) => teams.get(teamId) && openPreview(teams.get(teamId)),
   onSafe: (teamId) => openSafe(teamId),
+  onReset: (teamId) => sendWS({ type: 'reset_team', teamId }),
 });
 initSafe({ send: sendWS, getTeam: (id) => teams.get(id) });
 initBoard({

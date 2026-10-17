@@ -758,6 +758,7 @@ export function send(agentId: string, text: string, origin: Origin, card?: Task)
     .then(async () => {
       if (card) moveTask(card.id, { status: card.kind === 'review' ? 'review' : 'doing' });
       const reply = await runTurn(agentId, text, origin);
+      forgetting.delete(agentId);
       const who = getAgent(agentId);
       if (who?.isOrchestrator) settleParents(who.teamId);
       if (card) {
@@ -776,6 +777,18 @@ export function send(agentId: string, text: string, origin: Origin, card?: Task)
 
 export function stop(agentId: string) {
   controllers.get(agentId)?.abort();
+}
+
+// Agents mid-turn when their memory was cleared; their running turn mustn't save its session back.
+const forgetting = new Set<string>();
+
+// Like /clear for every agent on the team: their next turn starts a fresh conversation.
+export function resetTeamMemory(teamId: string) {
+  for (const a of teamMembers(teamId)) {
+    if (controllers.has(a.id)) forgetting.add(a.id);
+    updateAgent(a.id, { sessionId: null });
+    chat(a.id, 'system', 'Memory cleared. The next task starts a fresh conversation.');
+  }
 }
 
 function childEnv() {
@@ -890,7 +903,7 @@ async function runTurn(agentId: string, text: string, origin: Origin, retried = 
 }
 
 function handle(agent: Agent, m: SDKMessage, texts: string[]) {
-  if ('session_id' in m && m.session_id && getAgent(agent.id)?.sessionId !== m.session_id) {
+  if ('session_id' in m && m.session_id && !forgetting.has(agent.id) && getAgent(agent.id)?.sessionId !== m.session_id) {
     updateAgent(agent.id, { sessionId: m.session_id });
   }
   if ('parent_tool_use_id' in m && m.parent_tool_use_id) return; // subagent internals
