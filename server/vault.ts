@@ -72,6 +72,12 @@ function store(teamId: string, v: Vault) {
   chmodSync(file, 0o600);
 }
 
+// Set a deleted team's safe aside rather than destroying it, in case the owner wants it back.
+export function retireVault(teamId: string) {
+  const file = fileFor(teamId);
+  if (existsSync(file)) renameSync(file, `${file}.deleted-${Date.now()}`);
+}
+
 export function checkName(env: string, key?: string) {
   if (!ENV_RE.test(env)) return 'Environment names are lowercase letters, numbers and dashes, like "local" or "prod".';
   if (key !== undefined && !KEY_RE.test(key)) return 'Keys are letters, numbers and underscores, starting with a letter, like STRIPE_KEY.';

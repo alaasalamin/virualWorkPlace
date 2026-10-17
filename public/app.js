@@ -146,6 +146,20 @@ function onEvent(e) {
       $('td-error').hidden = false;
       $('td-submit').disabled = false;
       break;
+    case 'team_removed':
+      teams.delete(e.teamId);
+      for (const a of [...agents.values()]) {
+        if (a.teamId !== e.teamId) continue;
+        agents.delete(a.id);
+        delete chats[a.id];
+        document.querySelector(`.station[data-id="${a.id}"]`)?.remove();
+        if (selected === a.id) closeChat();
+      }
+      for (const [id, t] of tasks) if (t.teamId === e.teamId) tasks.delete(id);
+      for (const [id, v] of visions) if (v.teamId === e.teamId) visions.delete(id);
+      renderOffice();
+      renderMemos();
+      break;
     case 'removed':
       agents.delete(e.agentId);
       document.querySelector(`.station[data-id="${e.agentId}"]`)?.remove();
@@ -819,6 +833,7 @@ let cameraRestored = initWorld({
   onPreview: (teamId) => teams.get(teamId) && openPreview(teams.get(teamId)),
   onSafe: (teamId) => openSafe(teamId),
   onReset: (teamId) => sendWS({ type: 'reset_team', teamId }),
+  onDelete: (teamId) => sendWS({ type: 'delete_team', teamId }),
 });
 initSafe({ send: sendWS, getTeam: (id) => teams.get(id) });
 initBoard({

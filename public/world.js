@@ -191,6 +191,29 @@ export function roomFor(teamId) {
   return world.querySelector(`.room[data-team="${teamId}"]`);
 }
 
+// A button that asks first: the first click arms it, a second within 4 seconds runs it.
+function twoClick(btn, label, ask, done, run) {
+  let armed;
+  const disarm = () => {
+    armed = undefined;
+    btn.textContent = label;
+    btn.classList.remove('armed');
+  };
+  btn.addEventListener('click', () => {
+    if (!armed) {
+      btn.textContent = ask;
+      btn.classList.add('armed');
+      armed = setTimeout(disarm, 4000);
+      return;
+    }
+    clearTimeout(armed);
+    disarm();
+    btn.textContent = done;
+    setTimeout(() => (btn.textContent = label), 2000);
+    run();
+  });
+}
+
 function makeRoom(team) {
   const el = document.createElement('section');
   el.className = 'room';
@@ -198,7 +221,10 @@ function makeRoom(team) {
   el.innerHTML = `
     <div class="wall">
       <button class="sign" title="Rename team"></button>
-      <button class="reset-team" title="Clear every agent's memory, like /clear">Reset</button>
+      <div class="room-actions">
+        <button class="reset-team" title="Clear every agent's memory, like /clear">Reset</button>
+        <button class="delete-team" title="Remove this team and its agents. The project folder stays.">Delete team</button>
+      </div>
       <p class="project-tag"></p>
       <button class="vision-bar" hidden></button>
       <div class="window" aria-hidden="true"><span></span><span></span><span></span><span></span></div>
@@ -233,27 +259,8 @@ function makeRoom(team) {
   el.querySelector('.vision-bar').addEventListener('click', () => handlers.onBoard(team.id));
   el.querySelector('.tv').addEventListener('click', () => handlers.onPreview(team.id));
   el.querySelector('.safe').addEventListener('click', () => handlers.onSafe(team.id));
-  // Two clicks: the first asks, the second clears.
-  const reset = el.querySelector('.reset-team');
-  let armed;
-  reset.addEventListener('click', () => {
-    if (armed) {
-      clearTimeout(armed);
-      armed = undefined;
-      handlers.onReset(team.id);
-      reset.textContent = 'Cleared';
-      reset.classList.remove('armed');
-      setTimeout(() => (reset.textContent = 'Reset'), 2000);
-      return;
-    }
-    reset.textContent = 'Clear all memory?';
-    reset.classList.add('armed');
-    armed = setTimeout(() => {
-      armed = undefined;
-      reset.textContent = 'Reset';
-      reset.classList.remove('armed');
-    }, 4000);
-  });
+  twoClick(el.querySelector('.reset-team'), 'Reset', 'Clear all memory?', 'Cleared', () => handlers.onReset(team.id));
+  twoClick(el.querySelector('.delete-team'), 'Delete team', `Delete ${team.name}?`, 'Deleting…', () => handlers.onDelete(team.id));
   world.appendChild(el);
   return el;
 }

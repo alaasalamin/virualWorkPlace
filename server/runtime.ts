@@ -782,12 +782,13 @@ export function stop(agentId: string) {
 // Agents mid-turn when their memory was cleared; their running turn mustn't save its session back.
 const forgetting = new Set<string>();
 
-// Like /clear for every agent on the team: their next turn starts a fresh conversation.
+// Like /clear for every agent on the team: their next turn starts a fresh conversation, and their usage counts from $0.
 export function resetTeamMemory(teamId: string) {
   for (const a of teamMembers(teamId)) {
     if (controllers.has(a.id)) forgetting.add(a.id);
-    updateAgent(a.id, { sessionId: null });
-    chat(a.id, 'system', 'Memory cleared. The next task starts a fresh conversation.');
+    const fresh = updateAgent(a.id, { sessionId: null, costUsd: 0 });
+    if (fresh) broadcast({ type: 'agent', agent: fresh });
+    chat(a.id, 'system', 'Memory cleared and usage reset to $0. The next task starts a fresh conversation.');
   }
 }
 
@@ -962,7 +963,8 @@ function handle(agent: Agent, m: SDKMessage, texts: string[]) {
       break;
     }
     case 'result': {
-      const a = updateAgent(agent.id, { costUsd: m.total_cost_usd ?? 0 });
+      // A turn that was running when the team was reset belongs to the old count.
+      const a = forgetting.has(agent.id) ? getAgent(agent.id) : updateAgent(agent.id, { costUsd: m.total_cost_usd ?? 0 });
       if (a) broadcast({ type: 'agent', agent: a });
       if (m.subtype !== 'success') chat(agent.id, 'system', `Turn ended: ${m.subtype}`);
       break;

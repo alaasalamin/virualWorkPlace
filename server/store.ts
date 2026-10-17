@@ -179,6 +179,17 @@ export function createTeam(t: { name: string; project: string; orchestratorName:
   return { team, boss };
 }
 
+// Drops the team with its agents, chats, cards and visions. The project folder on disk stays.
+export function removeTeam(id: string) {
+  const members = new Set(state.agents.filter((a) => a.teamId === id).map((a) => a.id));
+  for (const a of members) delete state.chats[a];
+  state.agents = state.agents.filter((a) => !members.has(a.id));
+  state.tasks = state.tasks.filter((t) => t.teamId !== id);
+  state.visions = state.visions.filter((v) => v.teamId !== id);
+  state.teams = state.teams.filter((t) => t.id !== id);
+  save();
+}
+
 export function updateTeam(id: string, patch: Partial<Pick<Team, 'name'>>) {
   const t = state.teams.find((x) => x.id === id);
   if (!t) return;
