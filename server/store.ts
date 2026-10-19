@@ -43,6 +43,8 @@ export type Agent = {
   cwd: string;
   isOrchestrator: boolean;
   sessionId: string | null;
+  // How full the session's context was at the last model call, in tokens.
+  contextTokens?: number;
   costUsd: number;
   alwaysAllow: string[];
   skills: string[];

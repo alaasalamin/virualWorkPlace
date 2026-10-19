@@ -759,6 +759,7 @@ export function send(agentId: string, text: string, origin: Origin, card?: Task)
       if (card) moveTask(card.id, { status: card.kind === 'review' ? 'review' : 'doing' });
       const reply = await runTurn(agentId, text, origin);
       forgetting.delete(agentId);
+      clearIfBig(agentId);
       const who = getAgent(agentId);
       if (who?.isOrchestrator) settleParents(who.teamId);
       if (card) {
@@ -779,6 +780,18 @@ export function stop(agentId: string) {
   controllers.get(agentId)?.abort();
 }
 
+// Between tasks, a session bigger than this starts over, so every later step doesn't re-read a huge history.
+const CLEAR_AT = Number(process.env.AGENT_OFFICE_CLEAR_AT ?? 100_000);
+
+function clearIfBig(agentId: string) {
+  const a = getAgent(agentId);
+  const size = a?.contextTokens ?? 0;
+  if (!a?.sessionId || size <= CLEAR_AT) return;
+  const fresh = updateAgent(a.id, { sessionId: null, contextTokens: 0 });
+  if (fresh) broadcast({ type: 'agent', agent: fresh });
+  chat(a.id, 'system', `The conversation reached about ${Math.round(size / 1000)}k tokens, so the next task starts fresh to stay fast and cheap.`);
+}
+
 // Agents mid-turn when their memory was cleared; their running turn mustn't save its session back.
 const forgetting = new Set<string>();
 
@@ -786,7 +799,7 @@ const forgetting = new Set<string>();
 export function resetTeamMemory(teamId: string) {
   for (const a of teamMembers(teamId)) {
     if (controllers.has(a.id)) forgetting.add(a.id);
-    const fresh = updateAgent(a.id, { sessionId: null, costUsd: 0 });
+    const fresh = updateAgent(a.id, { sessionId: null, costUsd: 0, contextTokens: 0 });
     if (fresh) broadcast({ type: 'agent', agent: fresh });
     chat(a.id, 'system', 'Memory cleared and usage reset to $0. The next task starts a fresh conversation.');
   }
@@ -886,7 +899,7 @@ async function runTurn(agentId: string, text: string, origin: Origin, retried = 
       return texts.join('\n\n');
     } else if (agent.sessionId && !retried) {
       // The saved session may be gone; start a fresh one.
-      updateAgent(agentId, { sessionId: null });
+      updateAgent(agentId, { sessionId: null, contextTokens: 0 });
       return runTurn(agentId, text, origin, true);
     } else {
       chat(agentId, 'system', `Error: ${msg}`);
@@ -922,6 +935,9 @@ function handle(agent: Agent, m: SDKMessage, texts: string[]) {
       break;
     }
     case 'assistant': {
+      const u = m.message.usage;
+      const size = u ? (u.input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0) : 0;
+      if (size && !forgetting.has(agent.id) && getAgent(agent.id)?.contextTokens !== size) updateAgent(agent.id, { contextTokens: size });
       for (const b of m.message.content) {
         if (b.type === 'text' && b.text.trim()) {
           texts.push(b.text);

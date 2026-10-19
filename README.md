@@ -44,6 +44,9 @@ Requires Node 24+ and Claude Code logged in (`claude` → `/login`). Don't set
   shows an approval memo.
 - `server/store.ts`: agents and chat history in `data/state.json`. Sessions resume
   after a restart.
+- When an agent's conversation passes 100k tokens, its next task starts a fresh
+  session, which keeps turns fast and cheap. Set `AGENT_OFFICE_CLEAR_AT` to change
+  the limit. A team's Reset button clears everyone's session at once.
 - `public/`: the office UI. Characters are generated from each agent's name.
 
 The usage figure in the chat header is the API-equivalent estimate. On Max it
