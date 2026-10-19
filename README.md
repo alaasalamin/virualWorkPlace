@@ -31,6 +31,11 @@ with `[secret env:KEY]` in chats, task cards and messages between agents. Open
     npm install
     npm start          # http://localhost:4545
 
+Or make a Mac app for it with `scripts/make-app.sh`. It puts "Agent Office" in
+`~/Applications`: click it to start the office and open it in the browser, and click
+it again to open or stop it. From a terminal, `scripts/agent-office.sh start|stop|status`
+does the same. The server's output goes to `data/server.log`.
+
 Requires Node 24+ and Claude Code logged in (`claude` → `/login`). Don't set
 `ANTHROPIC_API_KEY`; the server strips it so agents use your subscription.
 
