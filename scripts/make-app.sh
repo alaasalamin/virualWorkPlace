@@ -1,5 +1,6 @@
 #!/bin/zsh
-# Builds "Agent Office.app" in ~/Applications. Click it to start the office; click again to open or stop it.
+# Builds "Agent Office.app" in ~/Applications and pins it to the Dock.
+# Click it to start the office and open it in Safari; click again to open or stop it.
 set -eu
 
 DIR="${0:A:h:h}"
@@ -29,5 +30,22 @@ else
 end if
 EOF
 
+# Give it the office icon (needs ImageMagick: brew install imagemagick), then re-sign so macOS accepts the change.
+if command -v magick >/dev/null; then
+  "$DIR/scripts/make-icon.sh" "$APP/Contents/Resources/applet.icns"
+  rm -f "$APP/Contents/Resources/Assets.car"
+  /usr/libexec/PlistBuddy -c "Delete :CFBundleIconName" "$APP/Contents/Info.plist" 2>/dev/null || true
+  codesign --force --deep -s - "$APP" 2>/dev/null
+  /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$APP"
+else
+  echo "ImageMagick isn't installed, so the app keeps the default icon (brew install imagemagick)."
+fi
 echo "Made $APP"
-echo "Drag it to the Dock to keep it handy."
+
+# Pin it to the Dock unless it's already there.
+if ! defaults read com.apple.dock persistent-apps 2>/dev/null | grep -q "Agent%20Office.app"; then
+  defaults write com.apple.dock persistent-apps -array-add \
+    "<dict><key>tile-data</key><dict><key>file-data</key><dict><key>_CFURLString</key><string>file://$APP/</string><key>_CFURLStringType</key><integer>15</integer></dict></dict></dict>"
+  killall Dock
+  echo "Pinned it to the Dock."
+fi

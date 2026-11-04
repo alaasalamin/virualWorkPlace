@@ -12,6 +12,7 @@ import { decide, onApprovalChange, pendingApprovals } from './approvals.ts';
 import { cardTitle, createTask, onRuntimeEvent, resetTeamMemory, scrubHistory, send, stop, triageTask } from './runtime.ts';
 import { changesFor, flushChanges, loadChanges } from './changes.ts';
 import { latestUsage, onUsage, refreshUsage, startUsagePolling, stopUsagePolling } from './usage.ts';
+import { latestSystem, onSystem, startSystemPolling, stopSystemPolling } from './system.ts';
 import { checkName, checkVaultAccess, deleteKey, exportJson, importJson, listKeys, readValue, retireVault, setValue } from './vault.ts';
 import { PROJECTS_DIR, getTeam, orchestratorOf, removeTask, removeVision, tasks, visions } from './store.ts';
 
@@ -83,13 +84,18 @@ function broadcast(event: unknown) {
 
 onRuntimeEvent(broadcast);
 onUsage((usage) => broadcast({ type: 'usage', usage }));
+onSystem((system) => broadcast({ type: 'system', system }));
 onApprovalChange(broadcast);
 
 wss.on('connection', (ws) => {
   // Keep the usage meter fresh only while someone has the office open.
   startUsagePolling();
+  startSystemPolling();
   ws.on('close', () => {
-    if (![...wss.clients].some((c) => c.readyState === WebSocket.OPEN)) stopUsagePolling();
+    if (![...wss.clients].some((c) => c.readyState === WebSocket.OPEN)) {
+      stopUsagePolling();
+      stopSystemPolling();
+    }
   });
   ws.send(
     JSON.stringify({
@@ -102,6 +108,7 @@ wss.on('connection', (ws) => {
       tasks: tasks(),
       visions: visions(),
       usage: latestUsage(),
+      system: latestSystem(),
       previewPort: PREVIEW_PORT,
       skills: catalog().map(({ id, name, description, plugin }) => ({ id, name, description, plugin })),
     }),

@@ -23,7 +23,7 @@ case "${1:-status}" in
     if ! command -v node >/dev/null; then echo "Node isn't installed. Get it from https://nodejs.org" >&2; exit 1; fi
     [[ -d "$DIR/node_modules" ]] || (cd "$DIR" && npm install >>"$LOG" 2>&1)
     mkdir -p "$DIR/data"
-    cd "$DIR" && nohup node server/index.ts >>"$LOG" 2>&1 &
+    cd "$DIR" && nohup npm start >>"$LOG" 2>&1 &
     echo $! >"$PID_FILE"
     for _ in {1..40}; do
       [[ -n "$(pid)" ]] && { echo running; exit 0; }
@@ -46,7 +46,7 @@ case "${1:-status}" in
     echo stopped
     ;;
   open)
-    open "$URL"
+    open -a Safari "$URL"
     ;;
   *)
     echo "usage: $0 start|stop|status|open" >&2

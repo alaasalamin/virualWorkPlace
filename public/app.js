@@ -5,6 +5,7 @@ import { initBoard, openBoard, refreshBoard, refreshVisions, renderVisionBar, re
 import { initAlerts, alertApproval, alertProblem, refreshAlerts } from './alerts.js';
 import { initPreview, openPreview, renderWork, setPreviewPort } from './work.js';
 import { initSafe, openSafe, onSafeEvent } from './safe.js';
+import { renderDials } from './dials.js';
 import { initVisits, onPeer, onMessage as visitMessage, onDelta as visitDelta, onStatus as visitStatus } from './visits.js';
 
 const $ = (id) => document.getElementById(id);
@@ -58,6 +59,7 @@ function onEvent(e) {
       for (const v of e.visions ?? []) visions.set(v.id, v);
       if (e.previewPort) setPreviewPort(e.previewPort);
       renderUsage(e.usage);
+      renderDials(e.system);
       renderOffice();
       renderMemos();
       refreshAlerts();
@@ -87,6 +89,9 @@ function onEvent(e) {
       break;
     case 'usage':
       renderUsage(e.usage);
+      break;
+    case 'system':
+      renderDials(e.system);
       break;
     case 'task': {
       const before = tasks.get(e.task.id);

@@ -1038,7 +1038,7 @@ select.chip { font: inherit; font-size: 12.5px; color: inherit; cursor: pointer;
   body.chatting .viewport { right: 0; }
   .minimap { width: 150px; height: 102px; }
   .hud-title { display: none; }
-  .usage-meter { width: 170px; }
+  .usage-meter, .dials { width: 170px; }
   .board-cols { grid-template-columns: repeat(4, 240px); }
   .pv-form a.link-btn, #pv-reset { display: none; }
   .safe-add { grid-template-columns: 1fr; }
@@ -1051,3 +1051,35 @@ select.chip { font: inherit; font-size: 12.5px; color: inherit; cursor: pointer;
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
 }
+
+/* ---------- this Mac's dials ---------- */
+
+.dials {
+  display: flex;
+  gap: 6px;
+  width: 210px;
+  padding: 8px 6px 6px;
+  box-sizing: border-box;
+  background: var(--paper);
+  border: 3px solid var(--ink);
+  border-radius: 12px;
+  box-shadow: 0 4px 0 var(--ink);
+}
+.dials[hidden] { display: none; }
+.dial { flex: 1; margin: 0; text-align: center; }
+.dial svg { display: block; width: 100%; overflow: visible; }
+.dial .zone { fill: none; stroke-width: 7; stroke-linecap: butt; }
+.dial .zone.low { stroke: var(--go); }
+.dial .zone.mid { stroke: #F5B83D; }
+.dial .zone.high { stroke: var(--stop); }
+.dial .ticks line { stroke: var(--ink); stroke-linecap: round; }
+.dial .lim { font: 700 8px var(--display); fill: var(--ink-soft); text-anchor: middle; dominant-baseline: middle; }
+.dial .needle { transform-origin: 50px 52px; transition: transform .9s cubic-bezier(.3, 1.3, .5, 1); }
+.dial .needle polygon { fill: var(--stop); stroke: var(--ink); stroke-width: 1.2; stroke-linejoin: round; }
+.dial .hub { fill: var(--ink); }
+.dial .value { font: 700 15px var(--display); fill: var(--ink); text-anchor: middle; }
+.dial figcaption { display: flex; flex-direction: column; margin-top: -2px; line-height: 1.15; }
+.dial figcaption b { font: 600 13px var(--display); }
+.dial figcaption small { font-size: 11px; color: var(--ink-soft); }
+.dial.hot .value { fill: var(--stop); }
+.dial.hot .needle polygon { animation: hop .6s ease-in-out infinite; }
