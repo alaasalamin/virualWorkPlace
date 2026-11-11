@@ -5,8 +5,11 @@ import { resolve, sep } from 'node:path';
 import {
   MODELS, PROJECTS_DIR, addAgent, addChat, findAgentByName, getAgent, getTeam, orchestratorOf, statuses, teamMembers, updateAgent,
 } from './store.ts';
-import { addTask, addVision, rewriteTeamText, tasks, tasksOf, touchVision, updateTask, visionsOf } from './store.ts';
-import type { Agent, ChatMsg, MilestoneStatus, ModelKey, Status, Task, Vision, VisionStatus } from './store.ts';
+import { addTask, addVision, rewriteTeamText, tasks, tasksOf, touchVision, updateTask, updateTeam, visionsOf } from './store.ts';
+import type { Agent, ChatMsg, MilestoneStatus, ModelKey, Status, Task, Team, Vision, VisionStatus } from './store.ts';
+import { changedCount, revertBetween, snapshot } from './snapshots.ts';
+import { allowedByRules, ruleLabel, suggestBashRule } from './rules.ts';
+import { runCheck } from './check.ts';
 import { dropEdit, recordEdit } from './changes.ts';
 import { noteRateLimit } from './usage.ts';
 import { checkName, deleteKey, envFileText, exportJson, isSensitive, listKeys, readValue, setValue, vaultVersion } from './vault.ts';
@@ -18,6 +21,7 @@ import { catalog, projectInstructions, projectSkills, resolveSkills } from './sk
 
 export type ServerEvent =
   | { type: 'agent'; agent: Agent }
+  | { type: 'team'; team: Team }
   | { type: 'status'; agentId: string; status: Status; detail: string }
   | { type: 'delta'; agentId: string; text: string }
   | { type: 'message'; msg: ChatMsg }
@@ -34,6 +38,9 @@ export type Origin =
   | { kind: 'board'; taskId: string }
   | { kind: 'report'; fromId: string; taskId: string }
   | { kind: 'boss' }
+  // From the office itself: a failed check to fix, or a request for handoff notes. label is what the chat shows.
+  | { kind: 'check'; label: string }
+  | { kind: 'handoff' }
   | { kind: 'peer'; fromId: string; depth: number; mode: 'message' | 'ask' };
 
 const MAX_PEER_DEPTH = 3;
@@ -110,7 +117,8 @@ function summarize(toolName: string, input: Record<string, unknown>) {
 function permissionsFor(agent: Agent): CanUseTool {
   return async (toolName, input, { signal, decisionReason }) => {
     const fresh = getAgent(agent.id) ?? agent;
-    if (AUTO_ALLOW.has(toolName) || toolName.startsWith('mcp__office__') || toolName.startsWith('mcp__team__') || fresh.alwaysAllow.includes(toolName)) {
+    const rules = [...fresh.alwaysAllow, ...(getTeam(fresh.teamId)?.allowRules ?? [])];
+    if (AUTO_ALLOW.has(toolName) || toolName.startsWith('mcp__office__') || toolName.startsWith('mcp__team__') || allowedByRules(rules, toolName, input)) {
       return { behavior: 'allow', updatedInput: input };
     }
     if (EDIT_TOOLS.has(toolName) && inside(input.file_path ?? input.notebook_path, fresh.cwd)) {
@@ -118,6 +126,8 @@ function permissionsFor(agent: Agent): CanUseTool {
     }
     const prev = statuses.get(agent.id);
     setStatus(agent.id, 'waiting', `wants to use ${toolName}`);
+    // What "always" would remember: the tool, or for a shell command only commands that start the same way.
+    const rule = toolName === 'Bash' ? suggestBashRule(input.command) : toolName;
     const d = await requestApproval(
       {
         kind: 'tool',
@@ -125,14 +135,30 @@ function permissionsFor(agent: Agent): CanUseTool {
         toolName,
         title: `${fresh.name} wants to use ${toolName}`,
         detail: summarize(toolName, input) + (decisionReason ? `\n\nWhy: ${decisionReason}` : ''),
+        data: { rule, ruleLabel: rule ? ruleLabel(rule) : null },
       },
       signal,
     );
     setStatus(agent.id, prev?.status === 'waiting' ? 'working' : prev?.status ?? 'working', prev?.detail ?? '');
-    if (d.approved && d.always) updateAgent(agent.id, { alwaysAllow: [...fresh.alwaysAllow, toolName] });
+    if (d.approved && d.always && rule) remember(agent.id, rule, !!d.team);
     if (d.approved) return { behavior: 'allow', updatedInput: input };
     return { behavior: 'deny', message: d.note ? `The user declined: ${d.note}` : 'The user declined this action.' };
   };
+}
+
+// Adds an "always allow" rule for one agent, or for their whole team.
+function remember(agentId: string, rule: string, forTeam: boolean) {
+  const a = getAgent(agentId);
+  if (!a) return;
+  const team = getTeam(a.teamId);
+  if (forTeam && team) {
+    if ((team.allowRules ?? []).includes(rule)) return;
+    const t = updateTeam(team.id, { allowRules: [...(team.allowRules ?? []), rule] });
+    if (t) broadcast({ type: 'team', team: t });
+  } else if (!a.alwaysAllow.includes(rule)) {
+    const updated = updateAgent(a.id, { alwaysAllow: [...a.alwaysAllow, rule] });
+    if (updated) broadcast({ type: 'agent', agent: updated });
+  }
 }
 
 // ---------- prompts ----------
@@ -484,16 +510,7 @@ function officeServer(boss: Agent) {
             const report = await run;
             return { content: [{ type: 'text', text: `${a.name}'s report:\n${report || '(no text reply)'}` }] };
           }
-          // Hand the report back to the orchestrator as its own message once the work is done.
-          run
-            .then((report) => {
-              const final = tasksOf(teamId).find((t) => t.id === card.id);
-              const outcome = final?.status === 'blocked' ? `stopped (${final.result ?? 'no reason given'})` : 'finished';
-              const parent = parentId ? tasksOf(teamId).find((t) => t.id === parentId) : undefined;
-              const header = `${a.name} ${outcome} "${card.title}"${parent ? `, part of board task "${parent.title}" (id ${parent.id})` : ''}.`;
-              send(boss.id, `${header}\n\n${report || '(no text reply)'}`, { kind: 'report', fromId: a.id, taskId: card.id }).catch(() => {});
-            })
-            .catch(() => {});
+          reportBack(boss, a, card, run);
           const where = ahead
             ? `${a.name} is busy, so this waits in their queue behind ${ahead} other ${ahead === 1 ? 'task' : 'tasks'}.`
             : `${a.name} has started.`;
@@ -502,6 +519,19 @@ function officeServer(boss: Agent) {
       ),
     ],
   });
+}
+
+// Hands a teammate's report back to the orchestrator as its own message once the work is done.
+function reportBack(boss: Agent, a: Agent, card: Task, run: Promise<string>) {
+  run
+    .then((report) => {
+      const final = tasksOf(card.teamId).find((t) => t.id === card.id);
+      const outcome = final?.status === 'blocked' ? `stopped (${final.result ?? 'no reason given'})` : 'finished';
+      const parent = card.parentId ? tasksOf(card.teamId).find((t) => t.id === card.parentId) : undefined;
+      const header = `${a.name} ${outcome} "${card.title}"${parent ? `, part of board task "${parent.title}" (id ${parent.id})` : ''}.`;
+      send(boss.id, `${header}\n\n${report || '(no text reply)'}`, { kind: 'report', fromId: a.id, taskId: card.id }).catch(() => {});
+    })
+    .catch(() => {});
 }
 
 function teamLines(selfId: string, teamId: string) {
@@ -753,13 +783,15 @@ export function send(agentId: string, text: string, origin: Origin, card?: Task)
   if (target && origin.kind !== 'user') text = redact(target.teamId, text);
   pendingTurns.set(agentId, (pendingTurns.get(agentId) ?? 0) + 1);
   const prev = queues.get(agentId) ?? Promise.resolve();
-  const next = prev
+  const work = prev
     .catch(() => {})
     .then(async () => {
-      if (card) moveTask(card.id, { status: card.kind === 'review' ? 'review' : 'doing' });
-      const reply = await runTurn(agentId, text, origin);
+      if (card) moveTask(card.id, { status: card.kind === 'review' ? 'review' : 'doing', interrupted: false });
+      // A worker's card remembers how the folder looked before and after, and has to pass the team's check.
+      const tracked = card && target && !target.isOrchestrator ? await beginWork(card, target) : null;
+      let reply = await runTurn(agentId, text, origin);
+      if (tracked) reply = await finishWork(tracked, reply);
       forgetting.delete(agentId);
-      clearIfBig(agentId);
       const who = getAgent(agentId);
       if (who?.isOrchestrator) settleParents(who.teamId);
       if (card) {
@@ -770,10 +802,135 @@ export function send(agentId: string, text: string, origin: Origin, card?: Task)
         if (boss && !controllers.has(boss.id)) settleParents(card.teamId);
       }
       return reply;
-    })
+    });
+  // The caller gets the reply as soon as the work is done; a memory reset, if due, happens before the next turn.
+  const tail = work
+    .catch(() => {})
+    .then(() => handoffIfBig(agentId))
+    .catch(() => {})
     .finally(() => pendingTurns.set(agentId, (pendingTurns.get(agentId) ?? 1) - 1));
-  queues.set(agentId, next);
-  return next;
+  queues.set(agentId, tail);
+  return work;
+}
+
+// ---------- what a task changed, and the check it has to pass ----------
+
+type Tracked = { card: Task; agent: Agent; base: string | null };
+
+// Who is working in each project folder right now: folder -> agent id -> card id.
+const working = new Map<string, Map<string, string>>();
+// How many times a worker gets to fix a failing check before the card is marked stopped.
+const CHECK_FIXES = 2;
+
+async function beginWork(card: Task, agent: Agent): Promise<Tracked> {
+  const base = await snapshot(agent.cwd);
+  const here = working.get(agent.cwd) ?? new Map<string, string>();
+  working.set(agent.cwd, here);
+  // Teammates in the same folder at the same time end up in each other's diffs; say so on the cards.
+  for (const id of here.values()) moveTask(id, { shared: true });
+  moveTask(card.id, { folder: agent.cwd, baseTree: base ?? undefined, endTree: undefined, changed: undefined, reverted: false, shared: here.size > 0 });
+  here.set(agent.id, card.id);
+  return { card, agent, base };
+}
+
+async function finishWork({ card, agent, base }: Tracked, reply: string): Promise<string> {
+  const cwd = agent.cwd;
+  try {
+    let end = base ? await snapshot(cwd) : null;
+    const command = card.kind === 'task' ? getTeam(agent.teamId)?.check?.trim() : '';
+    for (let attempt = 1; command && lastOutcome.get(agent.id)?.ok; attempt++) {
+      if (base && end === base) break; // no file changed, so there's nothing new to check
+      const abort = new AbortController();
+      controllers.set(agent.id, abort);
+      setStatus(agent.id, 'working', 'running the check');
+      chat(agent.id, 'system', `Running the team's check: ${command}`);
+      const r = await runCheck(cwd, command, abort.signal);
+      controllers.delete(agent.id);
+      setStatus(agent.id, 'idle');
+      if (r.ok) {
+        chat(agent.id, 'system', 'The check passed.');
+        break;
+      }
+      if (r.why === 'stopped') {
+        chat(agent.id, 'system', 'Stopped.');
+        lastOutcome.set(agent.id, { ok: false, reason: 'Stopped by the owner.' });
+        break;
+      }
+      const what = r.why === 'timeout' ? "didn't finish in time" : 'failed';
+      const output = redact(agent.teamId, r.output) || '(no output)';
+      if (attempt > CHECK_FIXES) {
+        chat(agent.id, 'system', `The check still ${what === 'failed' ? 'fails' : "doesn't finish"} after ${CHECK_FIXES} fixes, so the task is marked stopped.`);
+        lastOutcome.set(agent.id, { ok: false, reason: `The check (${command}) ${what}.\n${output.slice(-600)}` });
+        break;
+      }
+      reply = await runTurn(
+        agent.id,
+        `The team's check ran after your task and ${what}:\n\n$ ${command}\n\n${output}\n\nFix what your changes broke, then end with a short summary. If the failure has nothing to do with your work (it was already failing, or a teammate is mid-change in the same files), don't paper over it: say so plainly and leave it.`,
+        { kind: 'check', label: `The check ${what}: ${command}\n${output.slice(-1200)}` },
+      );
+      if (base) end = await snapshot(cwd);
+    }
+    if (base && end) moveTask(card.id, { endTree: end, changed: await changedCount(cwd, base, end) });
+  } finally {
+    working.get(cwd)?.delete(agent.id);
+  }
+  return reply;
+}
+
+// The owner wants a task's file changes undone.
+export async function revertTask(taskId: string): Promise<{ error?: string; reverted: string[]; skipped: string[] }> {
+  const t = tasks().find((x) => x.id === taskId);
+  const none = { reverted: [], skipped: [] };
+  if (!t?.folder || !t.baseTree || !t.endTree) return { ...none, error: 'There are no recorded changes for this task.' };
+  if (t.status !== 'done' && t.status !== 'blocked') return { ...none, error: 'This task is still running. Stop it first.' };
+  let r: Awaited<ReturnType<typeof revertBetween>>;
+  try {
+    r = await revertBetween(t.folder, t.baseTree, t.endTree);
+  } catch {
+    return { ...none, error: "The snapshot of this task is gone, so it can't be reverted any more." };
+  }
+  if (r.reverted.length) {
+    moveTask(t.id, { reverted: true });
+    const a = getAgent(t.assigneeId);
+    if (a) {
+      // The agent still remembers making these changes; tell it they're gone when it next works.
+      const files = r.reverted.slice(0, 20).join(', ') + (r.reverted.length > 20 ? ', …' : '');
+      updateAgent(a.id, {
+        notices: [...(a.notices ?? []), `the owner reverted the changes from your task "${t.title}". These files are back to how they were before it: ${files}.`],
+      });
+      chat(a.id, 'system', `You reverted ${r.reverted.length} ${r.reverted.length === 1 ? 'file' : 'files'} from "${t.title}".`);
+    }
+  }
+  return r;
+}
+
+// Picks up the cards that were unfinished when the app last stopped, each with whoever had it.
+export function resumeInterrupted(teamId: string) {
+  const all = tasksOf(teamId);
+  const list = all.filter((t) => t.interrupted && t.status === 'blocked').sort((a, b) => a.createdAt - b.createdAt);
+  const boss = orchestratorOf(teamId);
+  for (const t of list) {
+    const a = getAgent(t.assigneeId);
+    if (!a) {
+      moveTask(t.id, { interrupted: false, result: 'Whoever had this has left the team.' });
+      continue;
+    }
+    if (a.isOrchestrator) {
+      // A board card: with parts it finishes when they do; without, it still needs someone picked.
+      const split = all.some((p) => p.parentId === t.id);
+      moveTask(t.id, { status: split ? 'doing' : 'todo', result: '', interrupted: false });
+      if (!split) triageTask(t);
+      continue;
+    }
+    moveTask(t.id, { status: 'todo', result: '', interrupted: false });
+    const text = `The office restarted while you were on this task. Look at what you already did (your files, and your notes if you have any), then finish it:\n\n${t.detail}`;
+    const asker = t.createdBy === 'owner' ? undefined : getAgent(t.createdBy);
+    if (!asker) send(a.id, text, { kind: 'user' }, t).catch(() => {});
+    else if (asker.isOrchestrator) reportBack(asker, a, t, send(a.id, text, { kind: 'boss' }, t));
+    else send(a.id, text, { kind: 'peer', fromId: asker.id, depth: 1, mode: 'message' }, t).catch(() => {});
+  }
+  if (boss && !controllers.has(boss.id)) settleParents(teamId);
+  return list.length;
 }
 
 export function stop(agentId: string) {
@@ -783,13 +940,38 @@ export function stop(agentId: string) {
 // Between tasks, a session bigger than this starts over, so every later step doesn't re-read a huge history.
 const CLEAR_AT = Number(process.env.AGENT_OFFICE_CLEAR_AT ?? 100_000);
 
-function clearIfBig(agentId: string) {
+// Before the reset the agent writes itself a handoff note, which opens its next conversation.
+async function handoffIfBig(agentId: string) {
   const a = getAgent(agentId);
   const size = a?.contextTokens ?? 0;
   if (!a?.sessionId || size <= CLEAR_AT) return;
-  const fresh = updateAgent(a.id, { sessionId: null, contextTokens: 0 });
+  // After a stopped or failed turn the conversation stays, so "continue" still means something.
+  const last = lastOutcome.get(agentId);
+  if (last && !last.ok) return;
+  const notes = (await runTurn(agentId, handoffPrompt(a), { kind: 'handoff' })).trim();
+  const wrote = lastOutcome.get(agentId)?.ok;
+  if (last) lastOutcome.set(agentId, last);
+  forgetting.delete(agentId);
+  // Stopped while writing, or the team was reset meanwhile: nothing to hand over.
+  if (!wrote || !notes || !getAgent(agentId)?.sessionId) return;
+  const fresh = updateAgent(a.id, { sessionId: null, contextTokens: 0, notes: redact(a.teamId, notes).slice(0, 8000) });
   if (fresh) broadcast({ type: 'agent', agent: fresh });
-  chat(a.id, 'system', `The conversation reached about ${Math.round(size / 1000)}k tokens, so the next task starts fresh to stay fast and cheap.`);
+  chat(a.id, 'system', `The conversation reached about ${Math.round(size / 1000)}k tokens, so the next task starts fresh, with the notes above, to stay fast and cheap.`);
+}
+
+function handoffPrompt(a: Agent) {
+  const cover = a.isOrchestrator
+    ? `- What the owner wants and how they like things done
+- Who is on your team, what each is good at, and what each is working on right now
+- Work you're waiting on reports for, and what you planned to do when they arrive
+- Where each vision and board task stands (their ids too)`
+    : `- The project: what it is, the stack, how to run and check it
+- What you built or changed, with file paths
+- Decisions and conventions agreed with the owner or teammates
+- Anything unfinished, known problems, and what you'd do next`;
+  return `Your conversation has grown long. After this message it is reset, and your next task starts with a blank memory plus whatever you write now.
+Write the handoff note for your future self. Don't use any tools. Reply with only the note, under 400 words, covering:
+${cover}`;
 }
 
 // Agents mid-turn when their memory was cleared; their running turn mustn't save its session back.
@@ -799,7 +981,7 @@ const forgetting = new Set<string>();
 export function resetTeamMemory(teamId: string) {
   for (const a of teamMembers(teamId)) {
     if (controllers.has(a.id)) forgetting.add(a.id);
-    const fresh = updateAgent(a.id, { sessionId: null, costUsd: 0, contextTokens: 0 });
+    const fresh = updateAgent(a.id, { sessionId: null, costUsd: 0, contextTokens: 0, notes: '', notices: [] });
     if (fresh) broadcast({ type: 'agent', agent: fresh });
     chat(a.id, 'system', 'Memory cleared and usage reset to $0. The next task starts a fresh conversation.');
   }
@@ -821,8 +1003,19 @@ async function runTurn(agentId: string, text: string, origin: Origin, retried = 
     if (origin.kind === 'peer') chat(agentId, 'peer', text, { fromId: origin.fromId, mode: origin.mode });
     else if (origin.kind === 'board') chat(agentId, 'board', text);
     else if (origin.kind === 'report') chat(agentId, 'report', text, { fromId: origin.fromId });
+    else if (origin.kind === 'check') chat(agentId, 'system', origin.label);
+    else if (origin.kind === 'handoff') chat(agentId, 'system', 'This conversation is getting long. Writing handoff notes before it resets…');
     else chat(agentId, origin.kind, text);
   }
+  // A fresh conversation opens with the agent's own handoff notes; anything the office has to pass on comes first.
+  const intro: string[] = [];
+  if (!agent.sessionId && agent.notes && origin.kind !== 'handoff') {
+    intro.push(`Your memory was reset to keep conversations short. These are the handoff notes you wrote for yourself just before:\n\n${agent.notes}`);
+  }
+  const notices = agent.notices ?? [];
+  for (const n of notices) intro.push(`Note from the office: ${n}`);
+  const prompt = [...intro, promptFor(text, origin)].join('\n\n---\n\n');
+  let retrying = false;
   const depth = origin.kind === 'peer' ? origin.depth : 0;
   updateAgent(agentId, { busy: true });
   setStatus(agentId, 'thinking');
@@ -887,7 +1080,7 @@ async function runTurn(agentId: string, text: string, origin: Origin, retried = 
 
   const texts: string[] = [];
   try {
-    for await (const m of query({ prompt: promptFor(text, origin), options }) as AsyncIterable<SDKMessage>) {
+    for await (const m of query({ prompt, options }) as AsyncIterable<SDKMessage>) {
       handle(agent, m, texts);
     }
   } catch (err) {
@@ -900,7 +1093,8 @@ async function runTurn(agentId: string, text: string, origin: Origin, retried = 
     } else if (agent.sessionId && !retried) {
       // The saved session may be gone; start a fresh one.
       updateAgent(agentId, { sessionId: null, contextTokens: 0 });
-      return runTurn(agentId, text, origin, true);
+      retrying = true;
+      return await runTurn(agentId, text, origin, true);
     } else {
       chat(agentId, 'system', `Error: ${msg}`);
       setStatus(agentId, 'error', msg);
@@ -910,6 +1104,8 @@ async function runTurn(agentId: string, text: string, origin: Origin, retried = 
   } finally {
     controllers.delete(agentId);
     updateAgent(agentId, { busy: false });
+    // The notices were delivered with this turn, unless it's starting over.
+    if (notices.length && !retrying) updateAgent(agentId, { notices: (getAgent(agentId)?.notices ?? []).slice(notices.length) });
   }
   setStatus(agentId, 'idle');
   lastOutcome.set(agentId, { ok: true });

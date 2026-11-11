@@ -27,6 +27,10 @@ export type Team = {
   // Plot on the world map, in whole grid cells.
   col: number;
   row: number;
+  // A command (tests, type check, build) that has to pass before a worker's task counts as done.
+  check?: string;
+  // "Always allow" rules that apply to everyone on the team; see rules.ts.
+  allowRules?: string[];
   createdAt: number;
 };
 
@@ -48,6 +52,10 @@ export type Agent = {
   costUsd: number;
   alwaysAllow: string[];
   skills: string[];
+  // The handoff note the agent wrote before its last memory reset; given back when a fresh session starts.
+  notes?: string;
+  // Things the office has to tell the agent at the start of its next turn (e.g. the owner reverted its work).
+  notices?: string[];
   // True while a turn is running; still true on load means the app stopped mid-task.
   busy: boolean;
   createdAt: number;
@@ -80,6 +88,17 @@ export type Task = {
   result?: string;
   // When the assignee started on it (it moved to doing or review); used to estimate finish times.
   startedAt?: number;
+  // Snapshots of the project folder when the work started and ended (see snapshots.ts), and how many files differ.
+  folder?: string;
+  baseTree?: string;
+  endTree?: string;
+  changed?: number;
+  // A teammate worked in the same folder at the same time, so the diff includes their changes too.
+  shared?: boolean;
+  // The owner put the files back to how they were before this task.
+  reverted?: boolean;
+  // Unfinished when the app stopped; can be picked up again with "resume".
+  interrupted?: boolean;
   createdAt: number;
   updatedAt: number;
 };
@@ -122,10 +141,13 @@ export function load() {
     if (t.status === 'doing' || t.status === 'review' || t.status === 'todo') {
       t.status = 'blocked';
       t.result = 'The app stopped before this finished.';
+      t.interrupted = true;
     }
   }
   for (const a of state.agents) {
     a.skills ??= [];
+    // "Always allow Bash" used to cover every command; now each kind of command is its own rule.
+    a.alwaysAllow = (a.alwaysAllow ?? []).filter((r) => r !== 'Bash');
     if (a.busy) {
       a.busy = false;
       addChat(a.id, 'system', `The app stopped while ${a.name} was working. Ask them to continue if the task isn't finished.`);
@@ -192,7 +214,7 @@ export function removeTeam(id: string) {
   save();
 }
 
-export function updateTeam(id: string, patch: Partial<Pick<Team, 'name'>>) {
+export function updateTeam(id: string, patch: Partial<Pick<Team, 'name' | 'check' | 'allowRules'>>) {
   const t = state.teams.find((x) => x.id === id);
   if (!t) return;
   Object.assign(t, patch);
@@ -289,7 +311,10 @@ export function addTask(t: Pick<Task, 'teamId' | 'kind' | 'title' | 'detail' | '
   return task;
 }
 
-export function updateTask(id: string, patch: Partial<Pick<Task, 'status' | 'result'>>) {
+export function updateTask(
+  id: string,
+  patch: Partial<Pick<Task, 'status' | 'result' | 'folder' | 'baseTree' | 'endTree' | 'changed' | 'shared' | 'reverted' | 'interrupted'>>,
+) {
   const t = state.tasks.find((x) => x.id === id);
   if (!t) return;
   const now = Date.now();

@@ -19,7 +19,7 @@ const minimap = $('minimap');
 
 const cam = { x: ROOM_W / 2, y: ROOM_H / 2, z: 0.6 };
 let teams = [];
-let handlers = { onLot: () => {}, onSign: () => {}, onBoard: () => {}, onPreview: () => {}, onSafe: () => {}, onCamera: () => {} };
+let handlers = { onLot: () => {}, onSign: () => {}, onBoard: () => {}, onPreview: () => {}, onSafe: () => {}, onRun: () => {}, onRunLog: () => {}, onCamera: () => {} };
 let alertTeams = new Set();
 
 export const cellToWorld = (col, row) => ({ x: col * CELL_W, y: row * CELL_H });
@@ -249,6 +249,13 @@ function makeRoom(team) {
         </svg>
         <span>Safe</span>
       </button>
+      <div class="run" data-state="none">
+        <button class="run-btn" aria-label="Run the project"></button>
+        <div class="run-panel">
+          <span class="run-kind"></span>
+          <ul class="run-services"></ul>
+        </div>
+      </div>
       <div class="stage">
         <div class="team"></div>
         <div class="front"></div>
@@ -259,6 +266,11 @@ function makeRoom(team) {
   el.querySelector('.vision-bar').addEventListener('click', () => handlers.onBoard(team.id));
   el.querySelector('.tv').addEventListener('click', () => handlers.onPreview(team.id));
   el.querySelector('.safe').addEventListener('click', () => handlers.onSafe(team.id));
+  el.querySelector('.run-btn').addEventListener('click', () => handlers.onRun(team.id));
+  el.querySelector('.run-services').addEventListener('click', (e) => {
+    const row = e.target.closest('li[data-service]');
+    if (row && !e.target.closest('a')) handlers.onRunLog(team.id, row.dataset.service);
+  });
   twoClick(el.querySelector('.reset-team'), 'Reset', 'Clear all memory?', 'Cleared', () => handlers.onReset(team.id));
   twoClick(el.querySelector('.delete-team'), 'Delete team', `Delete ${team.name}?`, 'Deleting…', () => handlers.onDelete(team.id));
   world.appendChild(el);

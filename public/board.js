@@ -20,6 +20,10 @@ let ctx = {
   onCard: () => {},
   onAction: () => {},
   onAdd: () => {},
+  onDiff: () => {},
+  onCheck: () => {},
+  onResume: () => {},
+  hasCap: () => false,
 };
 let adding = false;
 let openTeamId = null;
@@ -53,6 +57,15 @@ export function initBoard(c) {
     adding = false;
     renderBoard();
   });
+  $('check-form').addEventListener('submit', (e) => {
+    e.preventDefault();
+    ctx.onCheck(openTeamId, $('check-cmd').value.trim());
+    $('check-cmd').blur();
+  });
+  $('resume-all').addEventListener('click', () => {
+    $('resume-all').disabled = true;
+    ctx.onResume(openTeamId);
+  });
   $('board-visions').addEventListener('click', (e) => {
     const btn = e.target.closest('[data-remove-vision]');
     if (!btn) return;
@@ -83,6 +96,8 @@ export function initBoard(c) {
       return renderBoard();
     }
     if (e.target.closest('form')) return;
+    const diff = e.target.closest('[data-diff]');
+    if (diff) return ctx.onDiff(diff.dataset.diff);
     const action = e.target.closest('[data-action]');
     if (action) {
       action.disabled = true;
@@ -180,6 +195,8 @@ function ago(ts) {
   return `${Math.round(h / 24)} d ago`;
 }
 
+const filesWord = (t) => `${t.changed} ${t.changed === 1 ? 'file' : 'files'}`;
+
 function partsHTML(t, parts) {
   if (!parts.length) {
     if (t.createdBy !== 'owner' || t.status !== 'todo') return '';
@@ -191,7 +208,8 @@ function partsHTML(t, parts) {
       ${parts
         .map((p) => {
           const a = ctx.getAgent(p.assigneeId);
-          return `<li class="part ${p.status}">${a ? portraitSVG(a.name, a.isOrchestrator) : ''}<b>${esc(a?.name ?? 'Left')}</b><span>${STATUS_WORDS[p.status]}</span></li>`;
+          const diff = p.changed ? `<button class="link-btn" data-diff="${esc(p.id)}" title="See what ${esc(a?.name ?? 'they')} changed">${filesWord(p)}${p.reverted ? ', reverted' : ''}</button>` : '';
+          return `<li class="part ${p.status}">${a ? portraitSVG(a.name, a.isOrchestrator) : ''}<b>${esc(a?.name ?? 'Left')}</b><span>${STATUS_WORDS[p.status]}</span>${diff}</li>`;
         })
         .join('')}
     </ul>
@@ -214,6 +232,7 @@ function cardHTML(t, parts = []) {
       <b>${esc(t.title)}</b>
       ${partsHTML(t, parts)}
       ${result}
+      ${t.changed ? `<button class="link-btn card-diff" data-diff="${esc(t.id)}">${filesWord(t)} changed${t.reverted ? ' (reverted)' : ''}</button>` : ''}
       <span class="card-foot">
         <span class="card-who">${who ? portraitSVG(who.name, who.isOrchestrator) : ''}${esc(who?.name ?? 'Left the team')}</span>
         <span>${meta}, ${ago(t.updatedAt)}</span>
@@ -222,10 +241,28 @@ function cardHTML(t, parts = []) {
     </div>`;
 }
 
+// The strip under the title: the team's check command, and picking up work a restart cut off.
+function renderTools() {
+  const team = ctx.getTeam(openTeamId);
+  const box = $('board-tools');
+  box.hidden = !team || !ctx.hasCap('check');
+  if (box.hidden) return;
+  // Don't overwrite a command that's being typed.
+  if (document.activeElement !== $('check-cmd')) $('check-cmd').value = team.check ?? '';
+  $('check-note').textContent = team.check
+    ? "Runs after each worker's task. If it fails, they get the output and fix it."
+    : 'Off. Set a command (tests, type check) that must pass before a card counts as done.';
+  const n = ctx.getTasks(openTeamId).filter((t) => t.interrupted && t.status === 'blocked').length;
+  $('resume-all').hidden = !n;
+  $('resume-all').disabled = false;
+  $('resume-all').textContent = `Resume ${n} interrupted ${n === 1 ? 'task' : 'tasks'}`;
+}
+
 function renderBoard() {
   const team = ctx.getTeam(openTeamId);
   if (!team) return;
   $('board-title').textContent = `${team.name}: task board`;
+  renderTools();
   renderVisions();
   const all = ctx.getTasks(openTeamId);
   const list = topLevel(all);
@@ -263,6 +300,11 @@ export function openBoard(teamId) {
 export function refreshBoard(teamId) {
   // Don't wipe a half-typed task.
   if (openTeamId && openTeamId === teamId && !adding) renderBoard();
+  else refreshBoardTools(teamId);
+}
+
+export function refreshBoardTools(teamId) {
+  if (openTeamId && openTeamId === teamId) renderTools();
 }
 
 export function refreshVisions(teamId) {

@@ -66,6 +66,87 @@ export async function renderWork(agent, box) {
     .join('');
 }
 
+// ---------- everything one task changed ----------
+
+let diffTaskId = null;
+
+export function initDiff(send) {
+  $('df-close').addEventListener('click', () => $('diff-dialog').close());
+  $('diff-dialog').addEventListener('close', () => (diffTaskId = null));
+  $('df-revert').addEventListener('click', (e) => {
+    const btn = e.currentTarget;
+    // Two clicks, so a stray one doesn't undo someone's work.
+    if (!btn.dataset.armed) {
+      btn.dataset.armed = '1';
+      btn.textContent = 'Click again to revert';
+      return;
+    }
+    btn.disabled = true;
+    send({ type: 'revert_task', taskId: diffTaskId });
+  });
+}
+
+function patchHTML(patch) {
+  const lines = patch.replace(/\n$/, '').split('\n');
+  const body = lines
+    .slice(0, MAX_LINES)
+    .map((l) => `<span class="dl ${l.startsWith('@@') ? 'hunk' : l[0] === '+' ? 'add' : l[0] === '-' ? 'del' : ''}">${esc(l) || ' '}</span>`)
+    .join('');
+  return body + (lines.length > MAX_LINES ? `<span class="dl">… ${lines.length - MAX_LINES} more lines</span>` : '');
+}
+
+const STATUS = { A: 'Created', M: 'Changed', D: 'Deleted' };
+
+export async function openTaskDiff(task, who) {
+  diffTaskId = task.id;
+  const btn = $('df-revert');
+  btn.hidden = true;
+  btn.disabled = false;
+  btn.textContent = 'Revert these changes';
+  delete btn.dataset.armed;
+  $('df-title').textContent = task.title;
+  $('df-note').textContent = '';
+  $('df-body').innerHTML = '<p class="work-empty">Loading…</p>';
+  $('diff-dialog').showModal();
+  let r;
+  try {
+    r = await (await fetch(`/api/task-diff?task=${encodeURIComponent(task.id)}`)).json();
+  } catch {
+    r = { error: "Couldn't load the changes. Is the server running?" };
+  }
+  if (diffTaskId !== task.id) return;
+  if (r.error || !r.files?.length) {
+    $('df-body').innerHTML = `<p class="work-empty">${esc(r.error ?? 'No files changed.')}</p>`;
+    return;
+  }
+  const n = r.files.length + (r.more ?? 0);
+  $('df-note').textContent =
+    `${n} ${n === 1 ? 'file' : 'files'} changed while ${who ?? 'they'} worked on this, including what shell commands did.` +
+    (task.shared ? ' A teammate was working in the same folder at the same time, so some of these may be theirs.' : '') +
+    (task.reverted ? ' You already reverted this.' : '');
+  btn.hidden = !!task.reverted || (task.status !== 'done' && task.status !== 'blocked');
+  $('df-body').innerHTML =
+    r.files
+      .map(
+        (f) => `<details class="change" open>
+          <summary><b>${esc(f.path)}</b><span>${STATUS[f.status] ?? 'Changed'}</span></summary>
+          <pre class="diff">${patchHTML(f.patch)}</pre>
+        </details>`,
+      )
+      .join('') + (r.more ? `<p class="work-empty">…and ${r.more} more files.</p>` : '');
+}
+
+export function onRevertResult(e) {
+  if (e.taskId !== diffTaskId) return;
+  $('df-revert').hidden = !e.error && e.reverted.length > 0;
+  $('df-revert').disabled = false;
+  $('df-revert').textContent = 'Revert these changes';
+  delete $('df-revert').dataset.armed;
+  const put = `Put back ${e.reverted.length} ${e.reverted.length === 1 ? 'file' : 'files'}.`;
+  const left = e.skipped.length ? ` Left alone because they changed again since: ${e.skipped.join(', ')}.` : '';
+  $('df-note').textContent = e.error ?? put + left;
+}
+
 // ---------- site preview ----------
 
 let previewPort = 4546;
@@ -94,10 +175,11 @@ function load(url) {
   $('pv-open').href = url;
 }
 
-export function openPreview(team) {
+// Prefers an address the owner typed, then the one the play button's server printed, then the project folder.
+export function openPreview(team, runningUrl = null) {
   previewTeam = team;
   $('pv-title').textContent = `${team.name}: preview`;
-  load(storedUrl(team.id) ?? defaultUrl(team));
+  load(storedUrl(team.id) ?? runningUrl ?? defaultUrl(team));
   $('preview-dialog').showModal();
 }
 

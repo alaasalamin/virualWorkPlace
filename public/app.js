@@ -1,23 +1,27 @@
 import { stationSVG, portraitSVG } from './characters.js';
 import { initWorld, renderRooms, roomFor, focusTeam, refreshCamera } from './world.js';
 import { describeWorker, teamEstimate, workerEstimate } from './eta.js';
-import { initBoard, openBoard, refreshBoard, refreshVisions, renderVisionBar, renderWhiteboard } from './board.js';
+import { initBoard, openBoard, refreshBoard, refreshBoardTools, refreshVisions, renderVisionBar, renderWhiteboard } from './board.js';
 import { initAlerts, alertApproval, alertProblem, refreshAlerts } from './alerts.js';
-import { initPreview, openPreview, renderWork, setPreviewPort } from './work.js';
+import { initDiff, initPreview, onRevertResult, openPreview, openTaskDiff, renderWork, setPreviewPort } from './work.js';
 import { initSafe, openSafe, onSafeEvent } from './safe.js';
 import { renderDials } from './dials.js';
+import { initRun, onRunEvent, openRunLog, renderRun, runUrl } from './run.js';
 import { initVisits, onPeer, onMessage as visitMessage, onDelta as visitDelta, onStatus as visitStatus } from './visits.js';
 
 const $ = (id) => document.getElementById(id);
 const teams = new Map();
 const tasks = new Map();
 const visions = new Map();
+const runs = new Map();
 let panelTab = 'chat';
 const agents = new Map();
 const statuses = {};
 const approvals = new Map();
 let chats = {};
 let skillCatalog = [];
+// What the server can do; an older server that's still running sends none, and its controls stay hidden.
+let caps = new Set();
 const streaming = {};
 let selected = null;
 let ws = null;
@@ -50,6 +54,7 @@ function onEvent(e) {
       for (const a of e.agents) agents.set(a.id, a);
       chats = e.chats;
       skillCatalog = e.skills ?? [];
+      caps = new Set(e.caps ?? []);
       Object.assign(statuses, e.statuses);
       approvals.clear();
       for (const a of e.approvals) approvals.set(a.id, a);
@@ -58,6 +63,8 @@ function onEvent(e) {
       visions.clear();
       for (const v of e.visions ?? []) visions.set(v.id, v);
       if (e.previewPort) setPreviewPort(e.previewPort);
+      runs.clear();
+      for (const [id, r] of Object.entries(e.runs ?? {})) runs.set(id, r);
       renderUsage(e.usage);
       renderDials(e.system);
       renderOffice();
@@ -80,18 +87,37 @@ function onEvent(e) {
       if (selected === e.agent.id) {
         renderHead();
         renderSkills();
+        renderRules();
       }
       break;
     case 'team':
       teams.set(e.team.id, e.team);
       renderOffice();
-      if (selected) renderHead();
+      refreshBoardTools(e.team.id);
+      if (selected) {
+        renderHead();
+        renderRules();
+      }
+      break;
+    case 'revert_result':
+      onRevertResult(e);
       break;
     case 'usage':
       renderUsage(e.usage);
       break;
     case 'system':
       renderDials(e.system);
+      break;
+    case 'run': {
+      runs.set(e.run.teamId, e.run);
+      const room = roomFor(e.run.teamId);
+      if (room) renderRun(room, e.run);
+      onRunEvent(e);
+      break;
+    }
+    case 'run_out':
+    case 'run_log':
+      onRunEvent(e);
       break;
     case 'task': {
       const before = tasks.get(e.task.id);
@@ -162,6 +188,7 @@ function onEvent(e) {
       }
       for (const [id, t] of tasks) if (t.teamId === e.teamId) tasks.delete(id);
       for (const [id, v] of visions) if (v.teamId === e.teamId) visions.delete(id);
+      runs.delete(e.teamId);
       renderOffice();
       renderMemos();
       break;
@@ -382,6 +409,7 @@ function renderOffice() {
     fitStage(room);
     renderWhiteboard(room, t.id);
     renderVisionBar(room, t.id);
+    renderRun(room, runs.get(t.id));
   }
   for (const a of agents.values()) updateStation(a.id);
   const people = agents.size;
@@ -550,7 +578,7 @@ function renderMemos() {
         <input placeholder="Reason, if you deny (optional)" aria-label="Reason">
         <div class="actions">
           <button class="btn go" data-act="yes">Allow</button>
-          <button class="btn" data-act="always">Always allow ${esc(a.toolName)}</button>
+          ${alwaysButtons(a)}
           <button class="btn no" data-act="no">Deny</button>
         </div>`;
     }
@@ -559,11 +587,21 @@ function renderMemos() {
       if (!act) return;
       if (act === 'goto') return jumpTo(a);
       const note = el.querySelector('input').value.trim() || undefined;
-      sendWS({ type: 'decide', id: a.id, approved: act !== 'no', always: act === 'always', note });
+      sendWS({ type: 'decide', id: a.id, approved: act !== 'no', always: act === 'always' || act === 'always-team', team: act === 'always-team', note });
       for (const b of el.querySelectorAll('button')) b.disabled = true;
     });
     box.appendChild(el);
   }
+}
+
+// "Always" remembers a rule: the tool, or for a shell command only commands that start the same way.
+// Commands that chain or redirect, and risky ones like rm, get no rule and are asked about every time.
+function alwaysButtons(a) {
+  const d = a.data;
+  if (!d || !('rule' in d)) return `<button class="btn" data-act="always">Always allow ${esc(a.toolName)}</button>`;
+  if (!d.rule) return '';
+  return `<button class="btn" data-act="always">Always allow <code>${esc(d.ruleLabel)}</code></button>
+          <button class="btn" data-act="always-team">Always, for the whole team</button>`;
 }
 
 const teamOfApproval = (a) => agents.get(a.agentId)?.teamId;
@@ -702,6 +740,36 @@ function renderSkills() {
     .join('');
 }
 
+// What this agent may do without asking: its own "always allow" rules and the team's.
+const SAFE_RULES = { vault_set: 'change the', vault_env: 'write .env files from the', vault_read: 'read values from the', vault_delete: 'delete from the' };
+
+function ruleText(rule) {
+  const cmd = rule.match(/^Bash\((.+)\)$/);
+  if (cmd) return `${cmd[1]} …`;
+  const safe = rule.match(/^(vault_\w+):(.+)$/);
+  return safe && SAFE_RULES[safe[1]] ? `${SAFE_RULES[safe[1]]} ${safe[2]} safe` : rule;
+}
+
+function renderRules() {
+  const a = agents.get(selected);
+  const mine = a?.alwaysAllow ?? [];
+  const shared = (a && teams.get(a.teamId)?.allowRules) ?? [];
+  const box = $('p-rules');
+  box.hidden = !caps.has('rules') || !(mine.length + shared.length);
+  if (box.hidden) return;
+  $('p-rules-sum').textContent = `Always allowed: ${mine.length + shared.length}`;
+  const row = (rule, scope) =>
+    `<span class="rule"><code>${esc(ruleText(rule))}</code>${scope === 'team' ? '<small>whole team</small>' : ''}<button type="button" class="link-btn" data-rule="${esc(rule)}" data-scope="${scope}">Remove</button></span>`;
+  $('p-rule-list').innerHTML = mine.map((r) => row(r, 'agent')).join('') + shared.map((r) => row(r, 'team')).join('');
+}
+
+$('p-rule-list').addEventListener('click', (e) => {
+  const btn = e.target.closest('[data-rule]');
+  const a = agents.get(selected);
+  if (!btn || !a) return;
+  sendWS({ type: 'remove_rule', rule: btn.dataset.rule, ...(btn.dataset.scope === 'team' ? { teamId: a.teamId } : { agentId: a.id }) });
+});
+
 $('p-skill-list').addEventListener('click', (e) => {
   const btn = e.target.closest('[data-skill]');
   const a = agents.get(selected);
@@ -735,6 +803,7 @@ function openChat(id, tab = 'chat') {
   $('panel').hidden = false;
   renderHead();
   renderSkills();
+  renderRules();
   renderComposer();
   $('p-tabs').hidden = agents.get(id)?.isOrchestrator ?? true;
   setTab(tab);
@@ -835,12 +904,15 @@ let cameraRestored = initWorld({
   onLot: (col, row) => openTeamDialog({ kind: 'new', col, row }),
   onSign: (teamId) => openTeamDialog({ kind: 'rename', teamId }),
   onBoard: (teamId) => openBoard(teamId),
-  onPreview: (teamId) => teams.get(teamId) && openPreview(teams.get(teamId)),
+  onPreview: (teamId) => teams.get(teamId) && openPreview(teams.get(teamId), runUrl(runs.get(teamId))),
   onSafe: (teamId) => openSafe(teamId),
+  onRun: (teamId) => sendWS({ type: 'run_toggle', teamId }),
+  onRunLog: (teamId, service) => openRunLog(teamId, service),
   onReset: (teamId) => sendWS({ type: 'reset_team', teamId }),
   onDelete: (teamId) => sendWS({ type: 'delete_team', teamId }),
 });
 initSafe({ send: sendWS, getTeam: (id) => teams.get(id) });
+initRun({ send: sendWS, getTeam: (id) => teams.get(id), getRun: (id) => runs.get(id) });
 initBoard({
   getTeam: (id) => teams.get(id),
   getTasks: (teamId) => [...tasks.values()].filter((t) => t.teamId === teamId).sort((a, b) => a.createdAt - b.createdAt),
@@ -850,6 +922,13 @@ initBoard({
   onAction: (taskId, action) => sendWS({ type: 'task_action', taskId, action }),
   onAdd: (teamId, title, detail) => sendWS({ type: 'add_task', teamId, title, detail }),
   getOrchestrator: (teamId) => orchOf(teamId),
+  hasCap: (c) => caps.has(c),
+  onCheck: (teamId, command) => sendWS({ type: 'set_check', teamId, command }),
+  onResume: (teamId) => sendWS({ type: 'resume_tasks', teamId }),
+  onDiff: (taskId) => {
+    const t = tasks.get(taskId);
+    if (t) openTaskDiff(t, agents.get(t.assigneeId)?.name);
+  },
   onCard: (agentId) => {
     const a = agents.get(agentId);
     if (!a) return;
@@ -859,5 +938,6 @@ initBoard({
 });
 initAlerts({ approvals: () => [...approvals.values()], teamOf: teamOfApproval, onJump: jumpTo });
 initPreview();
+initDiff(sendWS);
 refreshCamera();
 connect();

@@ -12,11 +12,25 @@ Click an empty lot to build a new team, or click a team's sign to rename it.
 
 Each building has a whiteboard: click it for the team's task board, which fills in on
 its own as work is assigned, reviewed and finished. Stopped tasks can be retried.
+Cards show how many files a task changed: click that for the full diff, including what shell
+commands did, and a button to revert it (files changed again since are left alone). The diffs come
+from snapshots the office keeps in `data/snapshots`; the project's own git is never touched.
+Set a "check before done" command on the board (tests, type check): it runs after each worker's task,
+and a failure goes back to them to fix, twice, before the card is marked stopped. After a restart,
+"Resume interrupted tasks" on the board hands unfinished cards back to whoever had them.
 Click a worker's laptop to see the files they changed as diffs, and the TV for a live
 preview of the team's site. Previews are served on the next port (4546), sandboxed so
 pages agents write can't control the office. For projects with their own server, type
 its address in the preview bar. Turn on alerts for a chime and notifications when
 someone needs your OK.
+
+Each office has a play button (bottom-right). It runs the project the way you would in a
+terminal and shows a row per process with its address: for a Laravel project `php artisan serve`,
+`npm run dev` (Vite), `queue:listen` when `.env` has a queue connection, and `reverb:start` when
+the app uses Reverb; for a Next.js, Vite or other Node project, `npm run dev`. Dots turn green once
+a process prints its address and the port answers, red if it exits or stops answering. Click a row
+for its output. Click the button again to stop everything it started; stopping the office stops
+them too. The preview opens on the running server's address.
 
 Each team has a safe (bottom-left of its office) for environment variables per
 environment (local, prod, …). It's encrypted with AES-256-GCM in `data/vaults/`, with
@@ -46,11 +60,14 @@ Requires Node 24+ and Claude Code logged in (`claude` → `/login`). Don't set
   `assign_task`.
 - Workers can read anything and edit files inside their own project folder
   (`../projects/<project>`). Anything else, such as commands that change things,
-  shows an approval memo.
+  shows an approval memo. "Always allow" on a shell command remembers only commands that start the
+  same way (`npm run test …`), for that agent or the whole team; commands that chain or redirect, and
+  risky ones like `rm`, are asked about every time. Remove rules from the agent's chat panel.
 - `server/store.ts`: agents and chat history in `data/state.json`. Sessions resume
   after a restart.
 - When an agent's conversation passes 100k tokens, its next task starts a fresh
-  session, which keeps turns fast and cheap. Set `AGENT_OFFICE_CLEAR_AT` to change
+  session, which keeps turns fast and cheap. Before the reset the agent writes itself handoff
+  notes, which open the new session. Set `AGENT_OFFICE_CLEAR_AT` to change
   the limit. A team's Reset button clears everyone's session at once.
 - `public/`: the office UI. Characters are generated from each agent's name.
 

@@ -9,10 +9,12 @@ import {
 import type { ModelKey } from './store.ts';
 import { catalog, ensureOfficePlugin, resolveSkills } from './skills.ts';
 import { decide, onApprovalChange, pendingApprovals } from './approvals.ts';
-import { cardTitle, createTask, onRuntimeEvent, resetTeamMemory, scrubHistory, send, stop, triageTask } from './runtime.ts';
+import { cardTitle, createTask, onRuntimeEvent, resetTeamMemory, resumeInterrupted, revertTask, scrubHistory, send, stop, triageTask } from './runtime.ts';
+import { diffBetween } from './snapshots.ts';
 import { changesFor, flushChanges, loadChanges } from './changes.ts';
 import { latestUsage, onUsage, refreshUsage, startUsagePolling, stopUsagePolling } from './usage.ts';
 import { latestSystem, onSystem, startSystemPolling, stopSystemPolling } from './system.ts';
+import { allRuns, describeRun, onRunChange, onRunOutput, runLog, stopAllRuns, stopRun, toggleRun } from './run.ts';
 import { checkName, checkVaultAccess, deleteKey, exportJson, importJson, listKeys, readValue, retireVault, setValue } from './vault.ts';
 import { PROJECTS_DIR, getTeam, orchestratorOf, removeTask, removeVision, tasks, visions } from './store.ts';
 
@@ -37,12 +39,14 @@ try {
   console.warn(`The team safes are unavailable: couldn't reach the macOS Keychain (${e instanceof Error ? e.message : e}).`);
 }
 ensureOfficePlugin();
+for (const t of teams()) describeRun(t.id);
 
 // Save everything before exiting so no conversation is lost.
 for (const sig of ['SIGINT', 'SIGTERM'] as const) {
   process.on(sig, () => {
     flush();
     flushChanges();
+    stopAllRuns();
     process.exit(0);
   });
 }
@@ -52,6 +56,21 @@ const http = createServer(async (req, res) => {
   if (url.pathname === '/api/changes') {
     res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
     res.end(JSON.stringify(changesFor(url.searchParams.get('agent') ?? '')));
+    return;
+  }
+  if (url.pathname === '/api/task-diff') {
+    // Everything a task changed in its folder, from the snapshots taken before and after it.
+    const t = tasks().find((x) => x.id === url.searchParams.get('task'));
+    let body: object = { error: 'There are no recorded changes for this task.' };
+    if (t?.folder && t.baseTree && t.endTree) {
+      try {
+        body = await diffBetween(t.folder, t.baseTree, t.endTree);
+      } catch {
+        body = { error: 'The snapshot of this task is gone.' };
+      }
+    }
+    res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+    res.end(JSON.stringify(body));
     return;
   }
   const rel = normalize(url.pathname === '/' ? '/index.html' : url.pathname);
@@ -85,6 +104,8 @@ function broadcast(event: unknown) {
 onRuntimeEvent(broadcast);
 onUsage((usage) => broadcast({ type: 'usage', usage }));
 onSystem((system) => broadcast({ type: 'system', system }));
+onRunChange((run) => broadcast({ type: 'run', run }));
+onRunOutput((teamId, service, line) => broadcast({ type: 'run_out', teamId, service, line }));
 onApprovalChange(broadcast);
 
 wss.on('connection', (ws) => {
@@ -109,7 +130,10 @@ wss.on('connection', (ws) => {
       visions: visions(),
       usage: latestUsage(),
       system: latestSystem(),
+      runs: allRuns(),
       previewPort: PREVIEW_PORT,
+      // Tells the page which newer controls this server understands.
+      caps: ['check', 'rules', 'resume', 'diff'],
       skills: catalog().map(({ id, name, description, plugin }) => ({ id, name, description, plugin })),
     }),
   );
@@ -134,7 +158,7 @@ wss.on('connection', (ws) => {
         break;
       }
       case 'decide':
-        decide(String(m.id), { approved: !!m.approved, always: !!m.always, note: m.note ? String(m.note) : undefined });
+        decide(String(m.id), { approved: !!m.approved, always: !!m.always, team: !!m.team, note: m.note ? String(m.note) : undefined });
         break;
       case 'stop':
         stop(String(m.agentId));
@@ -143,6 +167,7 @@ wss.on('connection', (ws) => {
         const teamId = String(m.teamId);
         if (!getTeam(teamId)) break;
         for (const a of teamMembers(teamId)) stop(a.id);
+        stopRun(teamId);
         removeTeam(teamId);
         retireVault(teamId);
         broadcast({ type: 'team_removed', teamId });
@@ -179,6 +204,7 @@ wss.on('connection', (ws) => {
         const { team, boss } = createTeam({ name, project, orchestratorName, model, col, row });
         broadcast({ type: 'team', team });
         broadcast({ type: 'agent', agent: boss });
+        broadcast({ type: 'run', run: describeRun(team.id) });
         ws.send(JSON.stringify({ type: 'team_created', teamId: team.id, orchestratorId: boss.id }));
         break;
       }
@@ -188,9 +214,58 @@ wss.on('connection', (ws) => {
         if (t) broadcast({ type: 'team', team: t });
         break;
       }
+      case 'set_check': {
+        // The command a worker's task has to pass before its card counts as done; empty turns it off.
+        const t = updateTeam(String(m.teamId), { check: String(m.command ?? '').trim().slice(0, 300) });
+        if (t) broadcast({ type: 'team', team: t });
+        break;
+      }
+      case 'remove_rule': {
+        // Take back an "always allow", from one agent or from a whole team.
+        const rule = String(m.rule ?? '');
+        const a = m.agentId ? getAgent(String(m.agentId)) : undefined;
+        const team = m.teamId ? getTeam(String(m.teamId)) : undefined;
+        if (a) {
+          const updated = updateAgent(a.id, { alwaysAllow: a.alwaysAllow.filter((r) => r !== rule) });
+          if (updated) broadcast({ type: 'agent', agent: updated });
+        } else if (team) {
+          const t = updateTeam(team.id, { allowRules: (team.allowRules ?? []).filter((r) => r !== rule) });
+          if (t) broadcast({ type: 'team', team: t });
+        }
+        break;
+      }
+      case 'resume_tasks': {
+        if (getTeam(String(m.teamId))) resumeInterrupted(String(m.teamId));
+        break;
+      }
+      case 'revert_task': {
+        const taskId = String(m.taskId);
+        revertTask(taskId)
+          .then((r) => ws.send(JSON.stringify({ type: 'revert_result', taskId, ...r })))
+          .catch((e) => ws.send(JSON.stringify({ type: 'revert_result', taskId, error: String(e?.message ?? e), reverted: [], skipped: [] })));
+        break;
+      }
       case 'refresh_usage':
         refreshUsage();
         break;
+      // ---------- the play button: run or stop the team's project ----------
+      case 'run_toggle': {
+        const teamId = String(m.teamId);
+        if (getTeam(teamId)) toggleRun(teamId);
+        break;
+      }
+      case 'run_check': {
+        // Look at the project again, e.g. after an agent scaffolded it.
+        const run = getTeam(String(m.teamId)) && describeRun(String(m.teamId));
+        if (run) broadcast({ type: 'run', run });
+        break;
+      }
+      case 'run_log': {
+        const teamId = String(m.teamId);
+        const service = String(m.service);
+        if (getTeam(teamId)) ws.send(JSON.stringify({ type: 'run_log', teamId, service, lines: runLog(teamId, service) }));
+        break;
+      }
       case 'add_task': {
         const team = getTeam(String(m.teamId));
         const title = String(m.title ?? '').trim().slice(0, 120);

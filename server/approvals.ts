@@ -12,7 +12,8 @@ export type Approval = {
   createdAt: number;
 };
 
-export type Decision = { approved: boolean; always?: boolean; note?: string };
+// always: remember this for the agent; with team, for everyone on the agent's team.
+export type Decision = { approved: boolean; always?: boolean; team?: boolean; note?: string };
 
 type Pending = { approval: Approval; resolve: (d: Decision) => void };
 

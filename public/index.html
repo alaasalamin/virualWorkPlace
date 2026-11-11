@@ -72,8 +72,27 @@
       <h2 id="board-title">Task board</h2>
       <button class="icon-btn" id="board-close" aria-label="Close board">✕</button>
     </header>
+    <div class="board-tools" id="board-tools" hidden>
+      <form class="check-form" id="check-form">
+        <label for="check-cmd">Check before done</label>
+        <input id="check-cmd" name="command" maxlength="300" spellcheck="false" autocomplete="off" placeholder="e.g. npm test">
+        <button class="btn no" type="submit">Save</button>
+        <small id="check-note"></small>
+      </form>
+      <button class="btn go" id="resume-all" hidden></button>
+    </div>
     <section class="board-visions" id="board-visions" aria-label="Visions" hidden></section>
     <div class="board-cols" id="board-cols"></div>
+  </dialog>
+
+  <dialog class="board-dialog diff-dialog" id="diff-dialog" aria-labelledby="df-title">
+    <header class="dialog-head">
+      <h2 id="df-title">Changes</h2>
+      <button class="btn no" id="df-revert" hidden>Revert these changes</button>
+      <button class="icon-btn" id="df-close" aria-label="Close changes">✕</button>
+    </header>
+    <p class="df-note" id="df-note" aria-live="polite"></p>
+    <div class="work" id="df-body"></div>
   </dialog>
 
   <dialog class="preview-dialog" id="preview-dialog" aria-labelledby="pv-title">
@@ -89,6 +108,18 @@
       <button class="icon-btn" id="pv-close" aria-label="Close preview">✕</button>
     </header>
     <iframe id="pv-frame" title="Site preview" sandbox="allow-scripts allow-forms allow-modals allow-popups"></iframe>
+  </dialog>
+
+  <dialog class="run-dialog" id="run-dialog" aria-labelledby="rl-title">
+    <header class="dialog-head">
+      <h2 id="rl-title">Output</h2>
+      <code class="rl-cmd" id="rl-cmd"></code>
+      <span class="rl-status" id="rl-status"></span>
+      <a class="link-btn" id="rl-open" target="_blank" rel="noopener" hidden>Open in a tab</a>
+      <button class="link-btn" id="rl-clear">Clear</button>
+      <button class="icon-btn" id="rl-close" aria-label="Close output">✕</button>
+    </header>
+    <pre class="rl-out" id="rl-out"></pre>
   </dialog>
 
   <dialog class="safe-dialog" id="safe-dialog" aria-labelledby="safe-title">
@@ -145,6 +176,10 @@
     <details class="skills" id="p-skills" hidden>
       <summary id="p-skills-sum">Skills</summary>
       <div class="skill-list" id="p-skill-list"></div>
+    </details>
+    <details class="skills" id="p-rules" hidden>
+      <summary id="p-rules-sum">Always allowed</summary>
+      <div class="rule-list" id="p-rule-list"></div>
     </details>
     <div class="tabs" id="p-tabs" role="tablist" hidden>
       <button role="tab" id="tab-chat" aria-selected="true">Chat</button>
