@@ -39,24 +39,39 @@ const isTrusted = (a) => {
   return caps.has('trust') ? !!a.trusted : localTrust.has(a.id);
 };
 const MAX_FREE_TEAM = 8;
-// Same tripwire as server/rules.ts: system commands and deleting folders outside the project still ask.
-const RISKY = /(^|[\s;&|(`])(sudo|su|doas|dd|mkfs\S*|diskutil|launchctl|osascript|security|defaults|shutdown|reboot)(\s|$)|(^|[\s;&|(`])rm\s+(-\S+\s+)*-\S*[rR]\S*[^;&|]*\s["']?(\/|~|\$HOME|\$\{HOME\}|\.\.)/;
-const EDITS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit']);
-// Answers a tool request for a trusted agent from this page. Only used with an older running office.
+// Same tripwire as server/rules.ts: system commands and deleting a home, disk or top-level folder still ask.
+const SYSTEM = /(^|[;&|(`\n])\s*(sudo|su|doas|dd|mkfs\S*|diskutil|launchctl|osascript|security|defaults|shutdown|reboot)(\s|$)/;
+const RM = /(?:^|[;&|(`\n])\s*rm\s+([^;&|\n)]*)/g;
+const SCRATCH = /^(\/private)?\/(tmp|var\/folders)(\/|$)/;
+function risky(command) {
+  if (SYSTEM.test(command)) return true;
+  for (const m of command.matchAll(RM)) {
+    const args = m[1].split(/\s+/).filter(Boolean);
+    if (!args.some((a) => /^-[a-zA-Z]*[rR]/.test(a) || a === '--recursive')) continue;
+    for (const raw of args) {
+      if (raw.startsWith('-')) continue;
+      const p = raw.replace(/["']/g, '').replace(/\/*\*?$/, '');
+      if (['', '~', '$HOME', '${HOME}', '.'].includes(p) || /^\.\.(\/\.\.)*$/.test(p)) return true;
+      if (p.startsWith('/') && !SCRATCH.test(p) && p.split('/').length <= 3) return true;
+    }
+  }
+  return false;
+}
+// Answers a request for a trusted agent from this page, where the running office is older than this
+// page and would still ask: before it knew the setting, or while it was stricter about what counts as risky.
 function autoApprove(ap) {
-  if (!localTrust.has(ap.agentId)) return false;
-  const boss = agents.get(ap.agentId);
+  const who = agents.get(ap.agentId);
   if (ap.kind === 'hire' || ap.kind === 'skills') {
     // An orchestrator that hires on its own: say yes for it, up to a team size.
-    const workers = [...agents.values()].filter((x) => x.teamId === boss?.teamId && !x.isOrchestrator).length;
-    if (caps.has('hiring') || !boss?.isOrchestrator || (ap.kind === 'hire' && workers >= MAX_FREE_TEAM)) return false;
+    const workers = [...agents.values()].filter((x) => x.teamId === who?.teamId && !x.isOrchestrator).length;
+    if (caps.has('hiring') || !who?.isOrchestrator || !localTrust.has(ap.agentId) || (ap.kind === 'hire' && workers >= MAX_FREE_TEAM)) return false;
     sendWS({ type: 'decide', id: ap.id, approved: true });
     return true;
   }
-  if (caps.has('trust') || ap.kind !== 'tool') return false;
-  // File edits only ask when they're outside the agent's folder, and a cut-off command can't be judged.
+  if (ap.kind !== 'tool' || !who || who.isOrchestrator || !isTrusted(who)) return false;
+  // A command that was cut off for display can't be judged here.
   const shown = String(ap.detail ?? '').split('\n\nWhy:')[0];
-  if (EDITS.has(ap.toolName) || (ap.toolName === 'Bash' && (shown.endsWith('…') || RISKY.test(shown)))) return false;
+  if (ap.toolName === 'Bash' && (shown.endsWith('…') || risky(shown))) return false;
   sendWS({ type: 'decide', id: ap.id, approved: true });
   return true;
 }

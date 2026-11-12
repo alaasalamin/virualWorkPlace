@@ -48,10 +48,29 @@ export function allowedByRules(rules: string[], toolName: string, input: Record<
 }
 
 // Commands the owner is still asked about when an agent works without asking: ones that take over the
-// machine, or delete folders outside the place they're run from. A tripwire for mistakes, not a sandbox.
-const SYSTEM = /(^|[\s;&|(`])(sudo|su|doas|dd|mkfs\S*|diskutil|launchctl|osascript|security|defaults|shutdown|reboot)(\s|$)/;
-const WIDE_DELETE = /(^|[\s;&|(`])rm\s+(-\S+\s+)*-\S*[rR]\S*[^;&|]*\s["']?(\/|~|\$HOME|\$\{HOME\}|\.\.)/;
-export const needsOwner = (command: unknown) => typeof command !== 'string' || SYSTEM.test(command) || WIDE_DELETE.test(command);
+// machine, or delete a whole home, disk or top-level folder. A tripwire for mistakes, not a sandbox.
+// Only where a command starts, so the word "security" inside a message or a sed script doesn't count.
+const SYSTEM = /(^|[;&|(`\n])\s*(sudo|su|doas|dd|mkfs\S*|diskutil|launchctl|osascript|security|defaults|shutdown|reboot)(\s|$)/;
+const RM = /(?:^|[;&|(`\n])\s*rm\s+([^;&|\n)]*)/g;
+const SCRATCH = /^(\/private)?\/(tmp|var\/folders)(\/|$)/;
+
+// "rm -r" aimed at /, the home folder, the folder it runs in, a parent, or something like /Users/name.
+// Temp folders and anything deeper (a project's dist, a worktree in /tmp) are everyday cleanup.
+function wideDelete(command: string) {
+  for (const m of command.matchAll(RM)) {
+    const args = m[1].split(/\s+/).filter(Boolean);
+    if (!args.some((a) => /^-[a-zA-Z]*[rR]/.test(a) || a === '--recursive')) continue;
+    for (const raw of args) {
+      if (raw.startsWith('-')) continue;
+      const p = raw.replace(/["']/g, '').replace(/\/*\*?$/, '');
+      if (['', '~', '$HOME', '${HOME}', '.'].includes(p) || /^\.\.(\/\.\.)*$/.test(p)) return true;
+      if (p.startsWith('/') && !SCRATCH.test(p) && p.split('/').length <= 3) return true;
+    }
+  }
+  return false;
+}
+
+export const needsOwner = (command: unknown) => typeof command !== 'string' || SYSTEM.test(command) || wideDelete(command);
 
 // A bare "Bash" from before rules existed allowed every command; it no longer counts.
 export const isLegacyRule = (rule: string) => rule === 'Bash';

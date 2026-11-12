@@ -127,8 +127,9 @@ function permissionsFor(agent: Agent): CanUseTool {
     if (EDIT_TOOLS.has(toolName) && inside(input.file_path ?? input.notebook_path, fresh.cwd)) {
       return { behavior: 'allow', updatedInput: input };
     }
-    // An agent the owner trusts works without asking, except for the few things that could hurt the machine.
-    const risky = toolName === 'Bash' ? needsOwner(input.command) : EDIT_TOOLS.has(toolName) && !inside(input.file_path ?? input.notebook_path, PROJECTS_DIR);
+    // An agent the owner trusts works without asking, except for the few commands that could hurt the machine.
+    // File edits aren't held back: an agent that can run commands can write anywhere anyway.
+    const risky = toolName === 'Bash' && needsOwner(input.command);
     if (fresh.trusted && !risky) return { behavior: 'allow', updatedInput: input };
     const prev = statuses.get(agent.id);
     setStatus(agent.id, 'waiting', `wants to use ${toolName}`);
