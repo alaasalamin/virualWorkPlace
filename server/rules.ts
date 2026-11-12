@@ -47,5 +47,11 @@ export function allowedByRules(rules: string[], toolName: string, input: Record<
   });
 }
 
+// Commands the owner is still asked about when an agent works without asking: ones that take over the
+// machine, or delete folders outside the place they're run from. A tripwire for mistakes, not a sandbox.
+const SYSTEM = /(^|[\s;&|(`])(sudo|su|doas|dd|mkfs\S*|diskutil|launchctl|osascript|security|defaults|shutdown|reboot)(\s|$)/;
+const WIDE_DELETE = /(^|[\s;&|(`])rm\s+(-\S+\s+)*-\S*[rR]\S*[^;&|]*\s["']?(\/|~|\$HOME|\$\{HOME\}|\.\.)/;
+export const needsOwner = (command: unknown) => typeof command !== 'string' || SYSTEM.test(command) || WIDE_DELETE.test(command);
+
 // A bare "Bash" from before rules existed allowed every command; it no longer counts.
 export const isLegacyRule = (rule: string) => rule === 'Bash';

@@ -63,6 +63,13 @@ Requires Node 24+ and Claude Code logged in (`claude` → `/login`). Don't set
   shows an approval memo. "Always allow" on a shell command remembers only commands that start the
   same way (`npm run test …`), for that agent or the whole team; commands that chain or redirect, and
   risky ones like `rm`, are asked about every time. Remove rules from the agent's chat panel.
+  Tick "Work without asking me" there to let a worker use its tools without memos at all; it still
+  asks before system commands such as `sudo`, deleting folders outside the project, and editing files
+  outside the projects folder.
+- Tick "Hire and let go without asking me" in an orchestrator's chat panel and it hires on its own when
+  more hands would speed the work up, choosing each hire's model and skills, and releases those hires
+  (`release_agent`) once they're idle and no longer needed. It stops at 8 teammates
+  (`AGENT_OFFICE_MAX_TEAM`); past that, and for people you approved yourself, you're still asked.
 - `server/store.ts`: agents and chat history in `data/state.json`. Sessions resume
   after a restart.
 - When an agent's conversation passes 100k tokens, its next task starts a fresh

@@ -22,6 +22,44 @@ let chats = {};
 let skillCatalog = [];
 // What the server can do; an older server that's still running sends none, and its controls stay hidden.
 let caps = new Set();
+// Agents told to work without asking while the running office is too old to remember that itself.
+// This page then answers their requests; a newer office takes the list over.
+let localTrust = new Set();
+try {
+  localTrust = new Set(JSON.parse(localStorage.getItem('office.trust') ?? '[]'));
+} catch {}
+function saveLocalTrust() {
+  try {
+    localStorage.setItem('office.trust', JSON.stringify([...localTrust]));
+  } catch {}
+}
+// For a worker: use tools without asking. For an orchestrator: hire and let go without asking.
+const isTrusted = (a) => {
+  if (a.isOrchestrator) return caps.has('hiring') ? !!teams.get(a.teamId)?.freeHiring : localTrust.has(a.id);
+  return caps.has('trust') ? !!a.trusted : localTrust.has(a.id);
+};
+const MAX_FREE_TEAM = 8;
+// Same tripwire as server/rules.ts: system commands and deleting folders outside the project still ask.
+const RISKY = /(^|[\s;&|(`])(sudo|su|doas|dd|mkfs\S*|diskutil|launchctl|osascript|security|defaults|shutdown|reboot)(\s|$)|(^|[\s;&|(`])rm\s+(-\S+\s+)*-\S*[rR]\S*[^;&|]*\s["']?(\/|~|\$HOME|\$\{HOME\}|\.\.)/;
+const EDITS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit']);
+// Answers a tool request for a trusted agent from this page. Only used with an older running office.
+function autoApprove(ap) {
+  if (!localTrust.has(ap.agentId)) return false;
+  const boss = agents.get(ap.agentId);
+  if (ap.kind === 'hire' || ap.kind === 'skills') {
+    // An orchestrator that hires on its own: say yes for it, up to a team size.
+    const workers = [...agents.values()].filter((x) => x.teamId === boss?.teamId && !x.isOrchestrator).length;
+    if (caps.has('hiring') || !boss?.isOrchestrator || (ap.kind === 'hire' && workers >= MAX_FREE_TEAM)) return false;
+    sendWS({ type: 'decide', id: ap.id, approved: true });
+    return true;
+  }
+  if (caps.has('trust') || ap.kind !== 'tool') return false;
+  // File edits only ask when they're outside the agent's folder, and a cut-off command can't be judged.
+  const shown = String(ap.detail ?? '').split('\n\nWhy:')[0];
+  if (EDITS.has(ap.toolName) || (ap.toolName === 'Bash' && (shown.endsWith('…') || RISKY.test(shown)))) return false;
+  sendWS({ type: 'decide', id: ap.id, approved: true });
+  return true;
+}
 const streaming = {};
 let selected = null;
 let ws = null;
@@ -58,6 +96,16 @@ function onEvent(e) {
       Object.assign(statuses, e.statuses);
       approvals.clear();
       for (const a of e.approvals) approvals.set(a.id, a);
+      if (caps.has('trust') && localTrust.size) {
+        for (const id of localTrust) {
+          const a = agents.get(id);
+          if (a?.isOrchestrator) sendWS({ type: 'set_hiring', teamId: a.teamId, on: true });
+          else if (a) sendWS({ type: 'set_trust', agentId: id, on: true });
+        }
+        localTrust.clear();
+        saveLocalTrust();
+      }
+      for (const a of e.approvals) autoApprove(a);
       tasks.clear();
       for (const t of e.tasks ?? []) tasks.set(t.id, t);
       visions.clear();
@@ -87,6 +135,7 @@ function onEvent(e) {
       if (selected === e.agent.id) {
         renderHead();
         renderSkills();
+        renderTrust();
         renderRules();
       }
       break;
@@ -96,6 +145,7 @@ function onEvent(e) {
       refreshBoardTools(e.team.id);
       if (selected) {
         renderHead();
+        renderTrust();
         renderRules();
       }
       break;
@@ -225,6 +275,7 @@ function onEvent(e) {
       onPeer(e);
       break;
     case 'approval':
+      if (autoApprove(e.approval)) break;
       approvals.set(e.approval.id, e.approval);
       renderMemos();
       refreshAlerts();
@@ -750,6 +801,37 @@ function ruleText(rule) {
   return safe && SAFE_RULES[safe[1]] ? `${SAFE_RULES[safe[1]]} ${safe[2]} safe` : rule;
 }
 
+function renderTrust() {
+  const a = agents.get(selected);
+  const box = $('p-trust');
+  box.hidden = !a;
+  if (box.hidden) return;
+  $('p-trust-on').checked = isTrusted(a);
+  if (a.isOrchestrator) {
+    $('p-trust-label').textContent = 'Hire and let go without asking me';
+    $('p-trust-note').textContent = caps.has('hiring')
+      ? `${a.name} adds people when more hands speed the work up, picks their model and skills, and lets them go when they're no longer needed. Up to ${MAX_FREE_TEAM} teammates; people you approved yourself stay until you let them go.`
+      : `Until the office is restarted this only works while this page is open, and covers hiring and skills (up to ${MAX_FREE_TEAM} teammates). Letting people go starts after the restart.`;
+    return;
+  }
+  $('p-trust-label').textContent = 'Work without asking me';
+  $('p-trust-note').textContent = caps.has('trust')
+    ? `${a.name} still asks before system commands like sudo, and before editing files outside the projects folder.`
+    : `Until the office is restarted this only works while this page is open, and ${a.name} still asks before system commands and edits outside its own folder.`;
+}
+
+$('p-trust-on').addEventListener('change', (e) => {
+  const a = agents.get(selected);
+  if (!a) return;
+  const on = e.target.checked;
+  if (a.isOrchestrator && caps.has('hiring')) return sendWS({ type: 'set_hiring', teamId: a.teamId, on });
+  if (!a.isOrchestrator && caps.has('trust')) return sendWS({ type: 'set_trust', agentId: a.id, on });
+  if (on) localTrust.add(a.id);
+  else localTrust.delete(a.id);
+  saveLocalTrust();
+  for (const ap of approvals.values()) autoApprove(ap);
+});
+
 function renderRules() {
   const a = agents.get(selected);
   const mine = a?.alwaysAllow ?? [];
@@ -803,6 +885,7 @@ function openChat(id, tab = 'chat') {
   $('panel').hidden = false;
   renderHead();
   renderSkills();
+  renderTrust();
   renderRules();
   renderComposer();
   $('p-tabs').hidden = agents.get(id)?.isOrchestrator ?? true;

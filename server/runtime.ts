@@ -3,12 +3,12 @@ import type { CanUseTool, Options, SDKMessage } from '@anthropic-ai/claude-agent
 import { z } from 'zod';
 import { resolve, sep } from 'node:path';
 import {
-  MODELS, PROJECTS_DIR, addAgent, addChat, findAgentByName, getAgent, getTeam, orchestratorOf, statuses, teamMembers, updateAgent,
+  MODELS, PROJECTS_DIR, addAgent, addChat, findAgentByName, getAgent, getTeam, orchestratorOf, removeAgent, statuses, teamMembers, updateAgent,
 } from './store.ts';
 import { addTask, addVision, rewriteTeamText, tasks, tasksOf, touchVision, updateTask, updateTeam, visionsOf } from './store.ts';
 import type { Agent, ChatMsg, MilestoneStatus, ModelKey, Status, Task, Team, Vision, VisionStatus } from './store.ts';
 import { changedCount, revertBetween, snapshot } from './snapshots.ts';
-import { allowedByRules, ruleLabel, suggestBashRule } from './rules.ts';
+import { allowedByRules, needsOwner, ruleLabel, suggestBashRule } from './rules.ts';
 import { runCheck } from './check.ts';
 import { dropEdit, recordEdit } from './changes.ts';
 import { noteRateLimit } from './usage.ts';
@@ -22,6 +22,7 @@ import { catalog, projectInstructions, projectSkills, resolveSkills } from './sk
 export type ServerEvent =
   | { type: 'agent'; agent: Agent }
   | { type: 'team'; team: Team }
+  | { type: 'removed'; agentId: string }
   | { type: 'status'; agentId: string; status: Status; detail: string }
   | { type: 'delta'; agentId: string; text: string }
   | { type: 'message'; msg: ChatMsg }
@@ -44,6 +45,8 @@ export type Origin =
   | { kind: 'peer'; fromId: string; depth: number; mode: 'message' | 'ask' };
 
 const MAX_PEER_DEPTH = 3;
+// How many workers a team can reach through hires the owner wasn't asked about; past this, hires ask again.
+const MAX_FREE_TEAM = Number(process.env.AGENT_OFFICE_MAX_TEAM ?? 8);
 const PEER_LIMIT_PER_HOUR = 20;
 
 let broadcast: (e: ServerEvent) => void = () => {};
@@ -124,6 +127,9 @@ function permissionsFor(agent: Agent): CanUseTool {
     if (EDIT_TOOLS.has(toolName) && inside(input.file_path ?? input.notebook_path, fresh.cwd)) {
       return { behavior: 'allow', updatedInput: input };
     }
+    // An agent the owner trusts works without asking, except for the few things that could hurt the machine.
+    const risky = toolName === 'Bash' ? needsOwner(input.command) : EDIT_TOOLS.has(toolName) && !inside(input.file_path ?? input.notebook_path, PROJECTS_DIR);
+    if (fresh.trusted && !risky) return { behavior: 'allow', updatedInput: input };
     const prev = statuses.get(agent.id);
     setStatus(agent.id, 'waiting', `wants to use ${toolName}`);
     // What "always" would remember: the tool, or for a shell command only commands that start the same way.
@@ -135,7 +141,7 @@ function permissionsFor(agent: Agent): CanUseTool {
         toolName,
         title: `${fresh.name} wants to use ${toolName}`,
         detail: summarize(toolName, input) + (decisionReason ? `\n\nWhy: ${decisionReason}` : ''),
-        data: { rule, ruleLabel: rule ? ruleLabel(rule) : null },
+        data: { rule, ruleLabel: rule ? ruleLabel(rule) : null, risky },
       },
       signal,
     );
@@ -202,15 +208,19 @@ Speak like a friendly colleague, in first person. Keep chat replies short. When 
 
 function orchestratorPrompt(a: Agent) {
   const team = getTeam(a.teamId);
+  const free = !!team?.freeHiring;
   return `You are ${a.name}, the orchestrator of ${team?.name ?? 'a team'} in a virtual office of AI agents. ${a.personality}
 You talk with the office owner (the user), understand what they want, and get it done through your team.
 Your team's project is "${team?.project}" (folder ${PROJECTS_DIR}/${team?.project}). New hires work there unless the owner asks for a separate project. Other teams in the office have their own orchestrators and projects; you only manage your own team.
 
 How you work:
 - Use list_team to see who is on your team and what they are doing.
-- When the team lacks a skill a task needs, call propose_agent to hire someone. Every hire needs the owner's approval, so explain briefly why in the reason field. Give each hire a real human first name that isn't already taken, a clear role, a short personality, and a model. Leave project empty to use the team's project.
+${free
+    ? `- You hire on your own: call propose_agent whenever the team lacks a skill a task needs, or when more hands would finish the work sooner because it splits into independent pieces. It takes effect at once; the owner is told, not asked. You choose each hire's model and skills. Give each hire a real human first name that isn't already taken, a clear role and a short personality, and say why in the reason field. Leave project empty to use the team's project.
+- When someone you hired on your own is no longer needed (their work is reported and nothing more is coming for them), call release_agent so the team doesn't stay bigger than the work. Teammates the owner hired stay until the owner lets them go.`
+    : `- When the team lacks a skill a task needs, call propose_agent to hire someone. Every hire needs the owner's approval, so explain briefly why in the reason field. Give each hire a real human first name that isn't already taken, a clear role, a short personality, and a model. Leave project empty to use the team's project.`}
 - Keep usage low; the owner prefers a slower team to an expensive one. Choose models deliberately: "sonnet" by default for engineering, "haiku" for simple or repetitive work, and "opus" only for senior roles: architecture, security review and hard debugging. Never hire a "fable" worker unless the owner asks.
-- Teammates can have skills: packaged expertise such as frontend design. Use list_skills to see what's available, give fitting skills when you hire (skills field), and use request_skills to add skills to someone already on the team. The owner approves both.
+- Teammates can have skills: packaged expertise such as frontend design. Use list_skills to see what's available, give fitting skills when you hire (skills field), and use request_skills to add skills to someone already on the team. ${free ? 'Both take effect without asking the owner.' : 'The owner approves both.'}
 - Teammates can message each other directly, for example to request a design review or send feedback. You'll see it in their chats. You may also receive messages from them.
 - The owner can add tasks to your team's board. You'll get each one as a message with its task id. Pick who delivers it and pass the task_id to assign_task so the card moves on the board.
 - Your team has a safe for environment variables (vault_list shows the keys). Never put secret values in task descriptions; tell teammates which keys to use from the safe.
@@ -357,17 +367,19 @@ function officeServer(boss: Agent) {
           }
           const added = ids.filter((id) => !a.skills.includes(id));
           if (!added.length) return { content: [{ type: 'text', text: `${a.name} already has those skills.` }] };
-          setStatus(boss.id, 'waiting', `wants skills for ${a.name}`);
-          const d = await requestApproval({
-            kind: 'skills',
-            agentId: boss.id,
-            title: `${boss.name} wants to give ${a.name} new skills`,
-            detail: reason,
-            data: { name: a.name, skills: added },
-          });
-          setStatus(boss.id, 'thinking');
-          if (!d.approved) {
-            return { content: [{ type: 'text', text: `The owner said no.${d.note ? ` Their note: ${d.note}` : ''}` }] };
+          if (!getTeam(teamId)?.freeHiring) {
+            setStatus(boss.id, 'waiting', `wants skills for ${a.name}`);
+            const d = await requestApproval({
+              kind: 'skills',
+              agentId: boss.id,
+              title: `${boss.name} wants to give ${a.name} new skills`,
+              detail: reason,
+              data: { name: a.name, skills: added },
+            });
+            setStatus(boss.id, 'thinking');
+            if (!d.approved) {
+              return { content: [{ type: 'text', text: `The owner said no.${d.note ? ` Their note: ${d.note}` : ''}` }] };
+            }
           }
           const updated = updateAgent(a.id, { skills: [...a.skills, ...added] });
           if (updated) broadcast({ type: 'agent', agent: updated });
@@ -441,26 +453,61 @@ function officeServer(boss: Agent) {
             return { content: [{ type: 'text', text: `Unknown skills: ${unknown.join(', ')}. Use list_skills.` }], isError: true };
           }
           const project = args.project?.trim() || getTeam(teamId)?.project || null;
-          setStatus(boss.id, 'waiting', `wants to hire ${args.name}`);
-          const d = await requestApproval({
-            kind: 'hire',
-            agentId: boss.id,
-            title: `${boss.name} wants to hire ${args.name}`,
-            detail: args.reason,
-            data: { ...args, project, skills: skillIds, team: getTeam(teamId)?.name },
-          });
-          setStatus(boss.id, 'thinking');
-          if (!d.approved) {
-            chat(boss.id, 'system', `You declined hiring ${args.name}${d.note ? `: ${d.note}` : ''}.`);
-            return { content: [{ type: 'text', text: `The owner rejected hiring ${args.name}.${d.note ? ` Their note: ${d.note}` : ''}` }] };
+          // With free hiring on, the orchestrator's choice of person, model and skills stands, up to a team size.
+          const workers = teamMembers(teamId).filter((m) => !m.isOrchestrator).length;
+          const free = !!getTeam(teamId)?.freeHiring && workers < MAX_FREE_TEAM;
+          let note = '';
+          if (!free) {
+            setStatus(boss.id, 'waiting', `wants to hire ${args.name}`);
+            const d = await requestApproval({
+              kind: 'hire',
+              agentId: boss.id,
+              title: `${boss.name} wants to hire ${args.name}`,
+              detail: args.reason,
+              data: { ...args, project, skills: skillIds, team: getTeam(teamId)?.name },
+            });
+            setStatus(boss.id, 'thinking');
+            if (!d.approved) {
+              chat(boss.id, 'system', `You declined hiring ${args.name}${d.note ? `: ${d.note}` : ''}.`);
+              return { content: [{ type: 'text', text: `The owner rejected hiring ${args.name}.${d.note ? ` Their note: ${d.note}` : ''}` }] };
+            }
+            note = d.note ? ` Owner's note: ${d.note}` : '';
           }
           const agent = addAgent({ ...args, teamId, project, skills: skillIds, model: args.model as ModelKey, isOrchestrator: false });
+          if (free) updateAgent(agent.id, { autoHired: true });
           setStatus(agent.id, 'idle');
           broadcast({ type: 'agent', agent });
-          chat(boss.id, 'system', `${agent.name} joined the team as ${agent.role}.`);
+          const how = `${agent.model} model${skillIds.length ? `, skills: ${skillIds.join(', ')}` : ''}`;
+          chat(boss.id, 'system', free ? `${boss.name} hired ${agent.name} as ${agent.role} (${how}). Why: ${args.reason}` : `${agent.name} joined the team as ${agent.role}.`);
           return {
-            content: [{ type: 'text', text: `Approved. ${agent.name} is hired and works in ${agent.cwd}.${d.note ? ` Owner's note: ${d.note}` : ''}` }],
+            content: [{ type: 'text', text: `${free ? 'Done' : 'Approved'}. ${agent.name} is hired and works in ${agent.cwd}.${note}` }],
           };
+        },
+      ),
+      tool(
+        'release_agent',
+        "Let a teammate go when the team no longer needs them. Works without the owner for people you hired on your own say, once they're idle with nothing left on the board. Their conversation is gone afterwards; files they wrote stay.",
+        {
+          agent_name: z.string(),
+          reason: z.string().describe('Why they are no longer needed, shown to the owner'),
+        },
+        async ({ agent_name, reason }) => {
+          const a = member(agent_name);
+          if (!a) {
+            return { content: [{ type: 'text', text: `No one named ${agent_name} on your team. Use list_team.` }], isError: true };
+          }
+          if (!getTeam(teamId)?.freeHiring || !a.autoHired) {
+            return { content: [{ type: 'text', text: `The owner hired ${a.name}, so letting them go is the owner's call. Tell the owner ${a.name} is no longer needed; they can let them go from ${a.name}'s chat.` }] };
+          }
+          const open = tasksOf(teamId).filter((t) => t.assigneeId === a.id && t.status !== 'done' && t.status !== 'blocked').length;
+          if (isBusy(a.id) || open) {
+            return { content: [{ type: 'text', text: `${a.name} is still working${open ? ` (${open} unfinished on the board)` : ''}. Wait for their report, then release them.` }] };
+          }
+          stop(a.id);
+          removeAgent(a.id);
+          broadcast({ type: 'removed', agentId: a.id });
+          chat(boss.id, 'system', `${boss.name} let ${a.name} go. Why: ${reason}`);
+          return { content: [{ type: 'text', text: `${a.name} has left the team.` }] };
         },
       ),
       tool(
@@ -1040,7 +1087,7 @@ async function runTurn(agentId: string, text: string, origin: Origin, retried = 
     options.additionalDirectories = [PROJECTS_DIR];
     options.mcpServers = { office: officeServer(agent) };
     options.allowedTools = [
-      'list_team', 'list_tasks', 'vault_list', 'list_skills', 'propose_agent', 'request_skills', 'assign_task',
+      'list_team', 'list_tasks', 'vault_list', 'list_skills', 'propose_agent', 'release_agent', 'request_skills', 'assign_task',
       'create_vision', 'update_vision', 'list_visions',
     ].map(
       (t) => `mcp__office__${t}`,

@@ -41,6 +41,13 @@ export function requestApproval(a: Omit<Approval, 'id' | 'createdAt'>, signal?: 
   });
 }
 
+// Says yes to the tool requests an agent already has waiting, once the owner lets it work without asking.
+export function approveWaiting(agentId: string) {
+  for (const p of [...pending.values()]) {
+    if (p.approval.kind === 'tool' && p.approval.agentId === agentId && !p.approval.data?.risky) p.resolve({ approved: true });
+  }
+}
+
 export function decide(id: string, d: Decision) {
   pending.get(id)?.resolve(d);
 }

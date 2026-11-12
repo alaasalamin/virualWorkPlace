@@ -31,6 +31,8 @@ export type Team = {
   check?: string;
   // "Always allow" rules that apply to everyone on the team; see rules.ts.
   allowRules?: string[];
+  // The orchestrator may hire, pick models and skills, and let go of its own hires without asking the owner.
+  freeHiring?: boolean;
   createdAt: number;
 };
 
@@ -51,6 +53,10 @@ export type Agent = {
   contextTokens?: number;
   costUsd: number;
   alwaysAllow: string[];
+  // The owner said this agent can use its tools without asking first.
+  trusted?: boolean;
+  // Hired by the orchestrator on its own say; it may also let them go on its own.
+  autoHired?: boolean;
   skills: string[];
   // The handoff note the agent wrote before its last memory reset; given back when a fresh session starts.
   notes?: string;
@@ -214,7 +220,7 @@ export function removeTeam(id: string) {
   save();
 }
 
-export function updateTeam(id: string, patch: Partial<Pick<Team, 'name' | 'check' | 'allowRules'>>) {
+export function updateTeam(id: string, patch: Partial<Pick<Team, 'name' | 'check' | 'allowRules' | 'freeHiring'>>) {
   const t = state.teams.find((x) => x.id === id);
   if (!t) return;
   Object.assign(t, patch);

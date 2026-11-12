@@ -8,7 +8,7 @@ import {
 } from './store.ts';
 import type { ModelKey } from './store.ts';
 import { catalog, ensureOfficePlugin, resolveSkills } from './skills.ts';
-import { decide, onApprovalChange, pendingApprovals } from './approvals.ts';
+import { approveWaiting, decide, onApprovalChange, pendingApprovals } from './approvals.ts';
 import { cardTitle, createTask, onRuntimeEvent, resetTeamMemory, resumeInterrupted, revertTask, scrubHistory, send, stop, triageTask } from './runtime.ts';
 import { diffBetween } from './snapshots.ts';
 import { changesFor, flushChanges, loadChanges } from './changes.ts';
@@ -133,7 +133,7 @@ wss.on('connection', (ws) => {
       runs: allRuns(),
       previewPort: PREVIEW_PORT,
       // Tells the page which newer controls this server understands.
-      caps: ['check', 'rules', 'resume', 'diff'],
+      caps: ['check', 'rules', 'resume', 'diff', 'trust', 'hiring'],
       skills: catalog().map(({ id, name, description, plugin }) => ({ id, name, description, plugin })),
     }),
   );
@@ -217,6 +217,21 @@ wss.on('connection', (ws) => {
       case 'set_check': {
         // The command a worker's task has to pass before its card counts as done; empty turns it off.
         const t = updateTeam(String(m.teamId), { check: String(m.command ?? '').trim().slice(0, 300) });
+        if (t) broadcast({ type: 'team', team: t });
+        break;
+      }
+      case 'set_trust': {
+        // Let a worker use its tools without asking first, or go back to asking.
+        const a = getAgent(String(m.agentId));
+        if (!a || a.isOrchestrator) break;
+        const updated = updateAgent(a.id, { trusted: !!m.on });
+        if (updated) broadcast({ type: 'agent', agent: updated });
+        if (m.on) approveWaiting(a.id);
+        break;
+      }
+      case 'set_hiring': {
+        // Let a team's orchestrator hire, choose models and skills, and release its own hires without asking.
+        const t = updateTeam(String(m.teamId), { freeHiring: !!m.on });
         if (t) broadcast({ type: 'team', team: t });
         break;
       }
